@@ -11,7 +11,9 @@
  * raw frames. Frame - a decoded raw frame (to be encoded or filtered).
  */
 
-#include <iostream>
+// #include <iostream>
+
+#include <fmt/core.h>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -19,6 +21,10 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libavutil/avutil.h>
 }
+
+// bigger binary size :(
+// might have to make my own fmt library or something
+// which doesn't have too much bloat
 
 int main() {
   // struct that holds some data about the container (format)
@@ -28,33 +34,31 @@ int main() {
   if (avformat_open_input(&fctx, "/Users/yusufredzic/Downloads/river.mp4",
                           nullptr, nullptr)) {
     // nonzero return value means FAILURE
-    std::cout << "avformat_open_input() returned failure, aborting...\n";
+    fmt::print("avformat_open_input() returned failure, aborting...\n");
     return -1;
   }
 
-  // so much bloat :(
-  std::cout << "Format " << fctx->iformat->long_name << ", duration "
-            << fctx->duration << " us\n";
+  fmt::print("Format {}, duration {} us\n", fctx->iformat->long_name,
+             fctx->duration);
 
   // this populates some fields in the context
   // possibly not necessary for all formats
   avformat_find_stream_info(fctx, nullptr);
 
-  std::cout << "number of streams: " << fctx->nb_streams << "\n";
+  fmt::print("number of streams: {}\n", fctx->nb_streams);
 
   for (size_t i = 0; i < fctx->nb_streams; i++) {
     // codec parameters for current stream
     auto curr_codecpar = fctx->streams[i]->codecpar;
     auto curr_codec = avcodec_find_decoder(curr_codecpar->codec_id);
 
-    // ok I give up, I will just use fmt even if it's not 100% perfect
-
     if (curr_codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-      std::cout << "Video codec: resolution " << curr_codecpar->width << " x "
-                << curr_codecpar->height << "px\n";
+      fmt::print("Video codec: resolution {}x{} px\n", curr_codecpar->width,
+                 curr_codecpar->height);
     } else if (curr_codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
-      std::cout << "Audio codec: " << curr_codecpar->ch_layout.nb_channels
-                << ", sample rate " << curr_codecpar->sample_rate << "hz\n";
+      fmt::print("Audio codec: channels: {}, sample rate: {}hz\n",
+                 curr_codecpar->ch_layout.nb_channels,
+                 curr_codecpar->sample_rate);
     }
   }
 

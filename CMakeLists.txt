@@ -19,6 +19,8 @@ pkg_check_modules(LIBAV REQUIRED IMPORTED_TARGET
     libavutil
 )
 
+add_subdirectory(third_party/fmt)
+
 add_executable(scenedetect main.cpp)
 
-target_link_libraries( scenedetect PkgConfig::LIBAV )
+target_link_libraries( scenedetect PkgConfig::LIBAV fmt )
