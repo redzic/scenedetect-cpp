@@ -31,6 +31,12 @@ extern "C" {
 #include <libavutil/pixfmt.h>
 }
 
+#define _ForceInline __attribute__((always_inline)) inline
+
+_ForceInline void svprint(std::string_view sv) {
+    write(STDOUT_FILENO, sv.data(), sv.size());
+}
+
 static void save_gray_frame(const uint8_t* __restrict buf, size_t stride,
                             size_t xsize, size_t ysize, const char* filename) {
     FILE* f = fopen(filename, "w");
@@ -70,7 +76,7 @@ int main() {
     if (avformat_open_input(&fctx, "/Users/yusufredzic/Downloads/river.mp4",
                             nullptr, nullptr)) {
         // nonzero return value means FAILURE
-        fmt::print("avformat_open_input() returned failure, aborting...\n");
+        svprint("avformat_open_input() returned failure, aborting...\n");
         return -1;
     }
 
