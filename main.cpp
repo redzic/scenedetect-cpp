@@ -11,8 +11,6 @@
  * raw frames. Frame - a decoded raw frame (to be encoded or filtered).
  */
 
-// #include <iostream>
-
 #include <fmt/core.h>
 
 extern "C" {
@@ -49,16 +47,17 @@ int main() {
 
   for (size_t i = 0; i < fctx->nb_streams; i++) {
     // codec parameters for current stream
-    auto curr_codecpar = fctx->streams[i]->codecpar;
-    auto curr_codec = avcodec_find_decoder(curr_codecpar->codec_id);
+    auto codecpar = fctx->streams[i]->codecpar;
+    auto codec = avcodec_find_decoder(codecpar->codec_id);
 
-    if (curr_codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-      fmt::print("Video codec: resolution {}x{} px\n", curr_codecpar->width,
-                 curr_codecpar->height);
-    } else if (curr_codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
-      fmt::print("Audio codec: channels: {}, sample rate: {}hz\n",
-                 curr_codecpar->ch_layout.nb_channels,
-                 curr_codecpar->sample_rate);
+    fmt::print("{: >8} ", codec->name);
+    if (codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+
+      fmt::print("[Video Codec] Resolution {}x{} px\n", codecpar->width,
+                 codecpar->height);
+    } else if (codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+      fmt::print("[Audio Codec] {}Ch, Sample Rate={}hz\n",
+                 codecpar->ch_layout.nb_channels, codecpar->sample_rate);
     }
   }
 
