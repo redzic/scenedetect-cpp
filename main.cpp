@@ -33,7 +33,7 @@ extern "C" {
 
 #define _ForceInline __attribute__((always_inline)) inline
 
-_ForceInline void svprint(std::string_view sv) {
+_ForceInline static void svprint(std::string_view sv) {
     write(STDOUT_FILENO, sv.data(), sv.size());
 }
 
