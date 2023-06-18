@@ -33,7 +33,7 @@ static void save_gray_frame(unsigned char *buf, int wrap, int xsize, int ysize,
   // writing the minimal required header for a pgm file format
   // portable graymap format ->
   // https://en.wikipedia.org/wiki/Netpbm_format#PGM_example
-  fprintf(f, "P5\n%d %d\n%d\n", xsize, ysize, 255);
+  fprintf(f, "P5\n%d %d\n255\n", xsize, ysize);
 
   // writing line by line
   for (i = 0; i < ysize; i++)
@@ -96,6 +96,9 @@ int main() {
 
     // allocate context
     auto codec_ctx = avcodec_alloc_context3(codec);
+
+    // yay! this actually works as intended
+    codec_ctx->thread_count = 8;
     // fill codec context with parameters
     avcodec_parameters_to_context(codec_ctx, codecpar);
     // initialize codec context based on AVCodec
@@ -112,6 +115,9 @@ int main() {
     // it really reads a packet basically
     while (av_read_frame(fctx, packet) >= 0) {
       if (packet->stream_index != stream_idx) {
+        // do we need to call this? seems to work either way
+        // av_packet_unref(packet);
+
         continue;
       }
 
