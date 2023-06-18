@@ -57,12 +57,18 @@ int main() {
 
     fmt::print("{: >6} ", codec->name);
 
+    bool skip_decode = true;
     if (codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
       fmt::println("[Video Codec] Resolution {}x{} px", codecpar->width,
                    codecpar->height);
+      skip_decode = false;
     } else if (codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
       fmt::println("[Audio Codec] {}Ch, Sample Rate={}hz",
                    codecpar->ch_layout.nb_channels, codecpar->sample_rate);
+    }
+
+    if (skip_decode) {
+      continue;
     }
 
     fmt::println("\t{}, ID {}, bit_rate {}", codec->long_name, (int)codec->id,
