@@ -11,10 +11,12 @@
  * raw frames. Frame - a decoded raw frame (to be encoded or filtered).
  */
 
-#include <_types/_uint8_t.h>
 #include <cassert>
+#include <cstdint>
+#include <cstdio>
 #include <fmt/core.h>
 #include <thread>
+#include <unistd.h>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -27,17 +29,23 @@ extern "C" {
 #include <libavutil/pixfmt.h>
 }
 
-static void save_gray_frame(uint8_t* buf, size_t wrap, size_t xsize,
-                            size_t ysize, const char* filename) {
+static void save_gray_frame(const uint8_t* __restrict buf, size_t stride,
+                            size_t xsize, size_t ysize, const char* filename) {
     FILE* f = fopen(filename, "w");
     // writing the minimal required header for a pgm file format
     // portable graymap format ->
     // https://en.wikipedia.org/wiki/Netpbm_format#PGM_example
     fprintf(f, "P5\n%zu %zu\n255\n", xsize, ysize);
 
-    // writing line by line
-    for (size_t i = 0; i < ysize; i++)
-        fwrite(buf + i * wrap, 1, xsize, f);
+    if (stride == xsize) {
+        write(fileno(f), buf, xsize * ysize);
+    } else {
+        // writing line by line
+        for (size_t i = 0; i < ysize; i++) {
+            fwrite(buf + i * stride, 1, xsize, f);
+        }
+    }
+
     fclose(f);
 }
 
