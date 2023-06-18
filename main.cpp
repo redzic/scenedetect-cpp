@@ -13,6 +13,7 @@
 
 #include <cassert>
 #include <fmt/core.h>
+#include <thread>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -98,7 +99,12 @@ int main() {
     auto codec_ctx = avcodec_alloc_context3(codec);
 
     // yay! this actually works as intended
-    codec_ctx->thread_count = 8;
+
+    auto n_threads = std::thread::hardware_concurrency();
+    if (n_threads) {
+      codec_ctx->thread_count = n_threads;
+    }
+
     // fill codec context with parameters
     avcodec_parameters_to_context(codec_ctx, codecpar);
     // initialize codec context based on AVCodec
