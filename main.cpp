@@ -14,7 +14,9 @@
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
+#include <fmt/compile.h>
 #include <fmt/core.h>
+#include <iterator>
 #include <thread>
 #include <unistd.h>
 
@@ -35,10 +37,17 @@ static void save_gray_frame(const uint8_t* __restrict buf, size_t stride,
     // writing the minimal required header for a pgm file format
     // portable graymap format ->
     // https://en.wikipedia.org/wiki/Netpbm_format#PGM_example
-    fprintf(f, "P5\n%zu %zu\n255\n", xsize, ysize);
+
+    auto fd = fileno(f);
+
+    auto header = fmt::memory_buffer();
+    fmt::format_to(std::back_inserter(header), FMT_COMPILE("P5\n{} {}\n255\n"),
+                   xsize, ysize);
+
+    write(fd, header.data(), header.size());
 
     if (stride == xsize) {
-        write(fileno(f), buf, xsize * ysize);
+        write(fd, buf, xsize * ysize);
     } else {
         // writing line by line
         for (size_t i = 0; i < ysize; i++) {
