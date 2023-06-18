@@ -11,6 +11,7 @@
  * raw frames. Frame - a decoded raw frame (to be encoded or filtered).
  */
 
+#include <cassert>
 #include <fmt/core.h>
 
 extern "C" {
@@ -19,8 +20,25 @@ extern "C" {
 #include <libavcodec/packet.h>
 #include <libavformat/avformat.h>
 #include <libavutil/avutil.h>
+#include <libavutil/error.h>
 #include <libavutil/frame.h>
 #include <libavutil/pixfmt.h>
+}
+
+static void save_gray_frame(unsigned char *buf, int wrap, int xsize, int ysize,
+                            const char *filename) {
+  FILE *f;
+  int i;
+  f = fopen(filename, "w");
+  // writing the minimal required header for a pgm file format
+  // portable graymap format ->
+  // https://en.wikipedia.org/wiki/Netpbm_format#PGM_example
+  fprintf(f, "P5\n%d %d\n%d\n", xsize, ysize, 255);
+
+  // writing line by line
+  for (i = 0; i < ysize; i++)
+    fwrite(buf + i * wrap, 1, xsize, f);
+  fclose(f);
 }
 
 // bigger binary size :(
@@ -48,9 +66,9 @@ int main() {
 
   fmt::print("number of streams: {}\n", fctx->nb_streams);
 
-  for (size_t i = 0; i < fctx->nb_streams; i++) {
+  for (size_t stream_idx = 0; stream_idx < fctx->nb_streams; stream_idx++) {
     // codec parameters for current stream
-    auto codecpar = fctx->streams[i]->codecpar;
+    auto codecpar = fctx->streams[stream_idx]->codecpar;
 
     // find suitable decoder for the codec parameters
     auto codec = avcodec_find_decoder(codecpar->codec_id);
@@ -89,22 +107,44 @@ int main() {
     auto packet = av_packet_alloc();
     auto frame = av_frame_alloc();
 
+    size_t frame_idx = 0;
+
     // it really reads a packet basically
     while (av_read_frame(fctx, packet) >= 0) {
+      if (packet->stream_index != stream_idx) {
+        continue;
+      }
+
       // send compressed packet to the CodecContext (decoder)
       avcodec_send_packet(codec_ctx, packet);
 
       // receive raw uncompressed frame
       // So is this guaranteed to work this way?
       // send one packet, receive one frame?
-      avcodec_receive_frame(codec_ctx, frame);
 
-      printf("Frame %c (%d) pts %d dts %d key_frame %d [coded_picture_number "
-             "%d, display_picture_number %d]\n",
-             av_get_picture_type_char(frame->pict_type),
-             codec_ctx->frame_number, frame->pts, frame->pkt_dts,
-             frame->key_frame, frame->coded_picture_number,
-             frame->display_picture_number);
+      // if this returns EAGAIN, we need to send more input
+      int response = avcodec_receive_frame(codec_ctx, frame);
+
+      if (response == AVERROR(EAGAIN)) {
+        continue;
+      }
+
+      assert(!response);
+
+      auto filename = fmt::format("{}.pgm", frame_idx);
+
+      // so we are indeed decoding some frames
+      // but like some of them aren't decoding properly
+
+      save_gray_frame(frame->data[0], frame->linesize[0], frame->width,
+                      frame->height, filename.c_str());
+
+      fmt::print("Frame {} ({}) pts {} dts {} key_frame {}\n",
+                 av_get_picture_type_char(frame->pict_type),
+                 codec_ctx->frame_num, frame->pts, frame->pkt_dts,
+                 frame->key_frame);
+
+      frame_idx++;
     }
   }
 
