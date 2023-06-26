@@ -14,10 +14,9 @@
 #include <array>
 #include <cassert>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
-#include <fmt/compile.h>
-#include <fmt/core.h>
 #include <iterator>
 #include <memory>
 #include <thread>
@@ -60,18 +59,12 @@ void save_gray_frame(const uint8* __restrict buf, size_t stride, size_t xsize,
     // portable graymap format ->
     // https://en.wikipedia.org/wiki/Netpbm_format#PGM_example
 
-    auto header = fmt::memory_buffer();
-    fmt::format_to(std::back_inserter(header), FMT_COMPILE("P5\n{} {}\n255\n"),
-                   xsize, ysize);
-
-    auto filed = fileno(file);
-
-    // how do I get compiler to warn about unused return value check
-    assert(write(filed, header.data(), header.size()) == header.size());
+    assert(fprintf(file, "P5\n%zu %zu\n255\n", xsize, ysize) > 0);
 
     if (stride == xsize) {
+        auto filed = fileno(file);
         auto n_written = write(filed, buf, xsize * ysize);
-        assert((n_written > 0) && (n_written == (xsize * ysize)));
+        assert((n_written > 0) && ((size_t)n_written == (xsize * ysize)));
     } else {
         // writing line by line
         for (size_t i = 0; i < ysize; i++) {
@@ -110,6 +103,8 @@ uint32 sum_abs_diff(const uint8* src1, const uint8* src2, size_t stride,
     return sum;
 }
 
+//
+
 // bigger binary size :(
 // might have to make my own fmt library or something
 // which doesn't have too much bloat
@@ -140,14 +135,14 @@ int main(int argc, const char* argv[]) {
         return -1;
     }
 
-    fmt::print("Format {}, duration {} us\n", fctx->iformat->long_name,
-               fctx->duration);
+    printf("Format %s, duration %lld us\n", fctx->iformat->long_name,
+           fctx->duration);
 
     // this populates some fields in the context
     // possibly not necessary for all formats
     avformat_find_stream_info(fctx, nullptr);
 
-    fmt::print("number of streams: {}\n", fctx->nb_streams);
+    printf("number of streams: %d\n", fctx->nb_streams);
 
     uint64 time_ns = 0;
 
@@ -158,25 +153,26 @@ int main(int argc, const char* argv[]) {
         // find suitable decoder for the codec parameters
         const auto* codec = avcodec_find_decoder(codecpar->codec_id);
 
-        fmt::print("{: >6} ", codec->name);
+        // fmt::print("{: >6} ", codec->name);
+        printf("%s ", codec->name);
 
         bool skip_decode = true;
         if (codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-            fmt::println("[Video Codec] Resolution {}x{} px", codecpar->width,
-                         codecpar->height);
+            printf("[Video Codec] Resolution %dx%d px\n", codecpar->width,
+                   codecpar->height);
+
             skip_decode = false;
         } else if (codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
-            fmt::println("[Audio Codec] {}Ch, Sample Rate={}hz",
-                         codecpar->ch_layout.nb_channels,
-                         codecpar->sample_rate);
+            printf("[Audio Codec] %dCh, Sample Rate=%dhz\n",
+                   codecpar->ch_layout.nb_channels, codecpar->sample_rate);
         }
 
         if (skip_decode) {
             continue;
         }
 
-        fmt::println("\t{}, ID {}, bit_rate {}", codec->long_name,
-                     (int)codec->id, codecpar->bit_rate);
+        printf("\t%s, ID %d, bit_rate %lld\n", codec->long_name, (int)codec->id,
+               codecpar->bit_rate);
 
         //  AVCodecContext is struct for decode/encode
 
@@ -204,7 +200,7 @@ int main(int argc, const char* argv[]) {
 
         // it really reads a packet basically
         while (av_read_frame(fctx, packet) >= 0) {
-            if (packet->stream_index != stream_idx) {
+            if (packet->stream_index != (int)stream_idx) {
                 continue;
             }
 
@@ -232,8 +228,6 @@ int main(int argc, const char* argv[]) {
 
             assert(!response);
 
-            // auto filename = fmt::format("{}.pgm", codec_ctx->frame_num);
-
             // so we are indeed decoding some frames
             // but like some of them aren't decoding properly
 
@@ -244,10 +238,11 @@ int main(int argc, const char* argv[]) {
 
             // TODO set build options in such a way that this
             // function call gets inlined?
-            fmt::print("Frame {} ({}) pts {} dts {} key_frame {}\n",
-                       av_get_picture_type_char(frame->pict_type),
-                       codec_ctx->frame_num, frame->pts, frame->pkt_dts,
-                       frame->key_frame);
+
+            printf("Frame %c (%lld) pts %lld dts %lld key_frame %d\n",
+                   av_get_picture_type_char(frame->pict_type),
+                   codec_ctx->frame_num, frame->pts, frame->pkt_dts,
+                   frame->key_frame);
 
             if (codec_ctx->frame_num > 1) {
                 // TODO assert all these strides and stuff are the same for
@@ -257,11 +252,10 @@ int main(int argc, const char* argv[]) {
                 };
                 auto start = get_time();
 
+                // Idea: average pixels in 8x8 blocks to avoid false
+                // positives due to noise in pixels
+
                 auto diff =
-
-                    // Idea: average pixels in 8x8 blocks to avoid false
-                    // positives due to noise in pixels
-
                     sum_abs_diff(framebuf[0]->data[0], framebuf[1]->data[0],
                                  framebuf[0]->linesize[0], framebuf[0]->width,
                                  framebuf[0]->height);
@@ -275,16 +269,15 @@ int main(int argc, const char* argv[]) {
                 // TODO add assert for checking if max abs diff will fit in
                 // uint32
 
-                // fmt::print("calculation took {}ns\n", duration.count());
                 time_ns += duration.count();
-                fmt::print("abs_diff(): {}\n\n", diff);
+                printf("abs_diff(): %d\n\n", diff);
             }
         }
     }
 
     avformat_free_context(fctx);
 
-    fmt::println("Total time consumed: {}ns", time_ns);
+    printf("Total time consumed: %lluns\n", time_ns);
 
     return 0;
 }

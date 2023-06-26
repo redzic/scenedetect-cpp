@@ -7,6 +7,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
 set(CMAKE_COLOR_MAKEFILE TRUE)
+set(CMAKE_COLOR_DIAGNOSTICS ON)
 
 # add_compile_options(-fsanitize=address)
 # add_link_options(-fsanitize=address)
@@ -30,8 +31,11 @@ pkg_check_modules(LIBAV REQUIRED IMPORTED_TARGET
 
 # set(CMAKE_CXX_CPPCHECK "cppcheck")
 
-add_subdirectory(third_party/fmt)
+# add_subdirectory(third_party/fmt)
+
 
 add_executable(scenedetect main.cpp)
 
-target_link_libraries( scenedetect PkgConfig::LIBAV fmt )
+target_compile_options(scenedetect PRIVATE -Wall -Wpedantic -Wextra -Wformat -Wformat-signedness)
+# target_link_libraries( scenedetect PkgConfig::LIBAV fmt )
+target_link_libraries( scenedetect PkgConfig::LIBAV )
