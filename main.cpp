@@ -86,14 +86,23 @@ uint32 sum_abs_diff(const uint8* src1, const uint8* src2, size_t stride,
                     size_t width, size_t height) {
     uint32 sum = 0;
 
-    while (height--) {
-        for (size_t i = 0; i < width; i++) {
-            sum += std::abs(static_cast<int32>(src1[i]) -
-                            static_cast<int32>(src2[i]));
-        }
+    auto absdiff = [](uint8 a, uint8 b) {
+        return std::abs(static_cast<int32>(a) - static_cast<int32>(b));
+    };
 
-        src1 += stride;
-        src2 += stride;
+    if (stride == width) {
+        for (size_t i = 0; i < (width * height); i++) {
+            sum += absdiff(src1[i], src2[i]);
+        }
+    } else {
+        while (height--) {
+            for (size_t i = 0; i < width; i++) {
+                sum += absdiff(src1[i], src2[i]);
+            }
+
+            src1 += stride;
+            src2 += stride;
+        }
     }
 
     return sum;
