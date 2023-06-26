@@ -45,6 +45,7 @@ using int32 = std::int32_t;
 using int64 = std::int64_t;
 
 #define ForceInline __attribute__((always_inline)) inline
+#define NoInline __attribute__((noinline))
 
 namespace {
 
@@ -74,7 +75,8 @@ void save_gray_frame(const uint8* __restrict buf, size_t stride, size_t xsize,
     } else {
         // writing line by line
         for (size_t i = 0; i < ysize; i++) {
-            assert(fwrite(buf + i * stride, 1, xsize, file) == xsize);
+            assert(fwrite(buf, 1, xsize, file) == xsize);
+            buf += stride;
         }
     }
 
@@ -82,11 +84,11 @@ void save_gray_frame(const uint8* __restrict buf, size_t stride, size_t xsize,
 }
 
 // assumes each source plane has the same dimensions
-uint32 sum_abs_diff(const uint8* src1, const uint8* src2, size_t stride,
-                    size_t width, size_t height) {
+NoInline uint32 sum_abs_diff(const uint8* src1, const uint8* src2,
+                             size_t stride, size_t width, size_t height) {
     uint32 sum = 0;
 
-    auto absdiff = [](uint8 a, uint8 b) {
+    constexpr auto absdiff = [](uint8 a, uint8 b) {
         return std::abs(static_cast<int32>(a) - static_cast<int32>(b));
     };
 
@@ -177,8 +179,8 @@ int main() {
         // yay! this actually works as intended
 
         auto n_threads = std::thread::hardware_concurrency();
-        if (n_threads != 0U) {
-            codec_ctx->thread_count = n_threads;
+        if (n_threads > 0) {
+            codec_ctx->thread_count = static_cast<int32>(n_threads);
         }
 
         // fill codec context with parameters
