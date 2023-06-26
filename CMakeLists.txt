@@ -8,10 +8,10 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
 set(CMAKE_COLOR_MAKEFILE TRUE)
 
-add_compile_options(-fsanitize=address)
-add_link_options(-fsanitize=address)
-add_compile_options(-fsanitize=undefined)
-add_link_options(-fsanitize=undefined)
+# add_compile_options(-fsanitize=address)
+# add_link_options(-fsanitize=address)
+# add_compile_options(-fsanitize=undefined)
+# add_link_options(-fsanitize=undefined)
 
 # clang-tidy, cppcheck
 

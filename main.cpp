@@ -13,6 +13,7 @@
 
 #include <array>
 #include <cassert>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <fmt/compile.h>
@@ -33,6 +34,16 @@ extern "C" {
 #include <libavutil/pixfmt.h>
 }
 
+using uint8 = std::uint8_t;
+using uint16 = std::uint16_t;
+using uint32 = std::uint32_t;
+using uint64 = std::uint64_t;
+
+using int8 = std::int8_t;
+using int16 = std::int16_t;
+using int32 = std::int32_t;
+using int64 = std::int64_t;
+
 #define ForceInline __attribute__((always_inline)) inline
 
 namespace {
@@ -41,7 +52,7 @@ ForceInline void svprint(std::string_view strv) {
     write(STDOUT_FILENO, strv.data(), strv.size());
 }
 
-void save_gray_frame(const uint8_t* __restrict buf, size_t stride, size_t xsize,
+void save_gray_frame(const uint8* __restrict buf, size_t stride, size_t xsize,
                      size_t ysize, const char* filename) {
     FILE* file = fopen(filename, "w");
     // writing the minimal required header for a pgm file format
@@ -68,6 +79,24 @@ void save_gray_frame(const uint8_t* __restrict buf, size_t stride, size_t xsize,
     }
 
     assert(!fclose(file));
+}
+
+// assumes each source plane has the same dimensions
+uint32 sum_abs_diff(const uint8* src1, const uint8* src2, size_t stride,
+                    size_t width, size_t height) {
+    uint32 sum = 0;
+
+    while (height--) {
+        for (size_t i = 0; i < width; i++) {
+            sum += std::abs(static_cast<int32>(src1[i]) -
+                            static_cast<int32>(src2[i]));
+        }
+
+        src1 += stride;
+        src2 += stride;
+    }
+
+    return sum;
 }
 
 // bigger binary size :(
@@ -101,6 +130,8 @@ int main() {
     avformat_find_stream_info(fctx, nullptr);
 
     fmt::print("number of streams: {}\n", fctx->nb_streams);
+
+    uint64 time_ns = 0;
 
     for (size_t stream_idx = 0; stream_idx < fctx->nb_streams; stream_idx++) {
         // codec parameters for current stream
@@ -156,9 +187,6 @@ int main() {
         // it really reads a packet basically
         while (av_read_frame(fctx, packet) >= 0) {
             if (packet->stream_index != stream_idx) {
-                // do we need to call this? seems to work either way
-                // av_packet_unref(packet);
-
                 continue;
             }
 
@@ -186,7 +214,7 @@ int main() {
 
             assert(!response);
 
-            auto filename = fmt::format("{}.pgm", codec_ctx->frame_num);
+            // auto filename = fmt::format("{}.pgm", codec_ctx->frame_num);
 
             // so we are indeed decoding some frames
             // but like some of them aren't decoding properly
@@ -202,10 +230,43 @@ int main() {
                        av_get_picture_type_char(frame->pict_type),
                        codec_ctx->frame_num, frame->pts, frame->pkt_dts,
                        frame->key_frame);
+
+            if (codec_ctx->frame_num > 1) {
+                // TODO assert all these strides and stuff are the same for
+                // both
+                auto get_time = []() {
+                    return std::chrono::high_resolution_clock::now();
+                };
+                auto start = get_time();
+
+                auto diff =
+
+                    // Idea: average pixels in 8x8 blocks to avoid false
+                    // positives due to noise in pixels
+
+                    sum_abs_diff(framebuf[0]->data[0], framebuf[1]->data[0],
+                                 framebuf[0]->linesize[0], framebuf[0]->width,
+                                 framebuf[0]->height);
+
+                auto end = get_time();
+
+                auto duration =
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(end -
+                                                                         start);
+
+                // TODO add assert for checking if max abs diff will fit in
+                // uint32
+
+                // fmt::print("calculation took {}ns\n", duration.count());
+                time_ns += duration.count();
+                fmt::print("abs_diff(): {}\n\n", diff);
+            }
         }
     }
 
     avformat_free_context(fctx);
+
+    fmt::println("Total time consumed: {}ns", time_ns);
 
     return 0;
 }
