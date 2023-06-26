@@ -60,11 +60,11 @@ void save_gray_frame(const uint8* __restrict buf, size_t stride, size_t xsize,
     // portable graymap format ->
     // https://en.wikipedia.org/wiki/Netpbm_format#PGM_example
 
-    auto filed = fileno(file);
-
     auto header = fmt::memory_buffer();
     fmt::format_to(std::back_inserter(header), FMT_COMPILE("P5\n{} {}\n255\n"),
                    xsize, ysize);
+
+    auto filed = fileno(file);
 
     // how do I get compiler to warn about unused return value check
     assert(write(filed, header.data(), header.size()) == header.size());
@@ -84,20 +84,20 @@ void save_gray_frame(const uint8* __restrict buf, size_t stride, size_t xsize,
 }
 
 // assumes each source plane has the same dimensions
-NoInline uint32 sum_abs_diff(const uint8* src1, const uint8* src2,
-                             size_t stride, size_t width, size_t height) {
-    uint32 sum = 0;
-
+uint32 sum_abs_diff(const uint8* src1, const uint8* src2, size_t stride,
+                    size_t width, size_t height) {
     constexpr auto absdiff = [](uint8 a, uint8 b) {
         return std::abs(static_cast<int32>(a) - static_cast<int32>(b));
     };
+
+    uint32 sum = 0;
 
     if (stride == width) {
         for (size_t i = 0; i < (width * height); i++) {
             sum += absdiff(src1[i], src2[i]);
         }
     } else {
-        while (height--) {
+        while ((height--) != 0) {
             for (size_t i = 0; i < width; i++) {
                 sum += absdiff(src1[i], src2[i]);
             }
@@ -121,13 +121,20 @@ NoInline uint32 sum_abs_diff(const uint8* src1, const uint8* src2,
 // write().
 
 } // namespace
-int main() {
+
+int main(int argc, const char* argv[]) {
     // struct that holds some data about the container (format)
     // does this have to be freed manually?
+
+    if (argc < 2) {
+        svprint("scenedetect-cpp requires an input file to be specified, "
+                "aborting...\n");
+        return -1;
+    }
+
     auto* fctx = avformat_alloc_context();
 
-    if (avformat_open_input(&fctx, "/Users/yusufredzic/Downloads/river.mp4",
-                            nullptr, nullptr) != 0) {
+    if (avformat_open_input(&fctx, argv[1], nullptr, nullptr) != 0) {
         // nonzero return value means FAILURE
         svprint("avformat_open_input() returned failure, aborting...\n");
         return -1;
