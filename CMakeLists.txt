@@ -11,15 +11,10 @@ set(CMAKE_COLOR_DIAGNOSTICS ON)
 
 set(CMAKE_BUILD_TYPE Debug)
 
-add_compile_options(-fsanitize=address -fsanitize=undefined)
-add_link_options(-fsanitize=address -fsanitize=undefined)
 
-# add_compile_options(-fno-exceptions -fno-rtti)
-# add_link_options(-fno-exceptions -fno-rtti)
-
-# clang-tidy, cppcheck
-
-# hardening
+# required for no dependencies on Windows (other than ffmpeg shared libs)
+add_compile_options(-static-libstdc++ -static-libgcc -static)
+add_link_options(-static-libstdc++ -static-libgcc -static)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBAV REQUIRED IMPORTED_TARGET
@@ -32,9 +27,7 @@ pkg_check_modules(LIBAV REQUIRED IMPORTED_TARGET
     libavutil
 )
 
-
 add_executable(scenedetect main.cpp)
 
 target_compile_options(scenedetect PRIVATE -Wall -Wpedantic -Wextra -Wformat)
-# target_link_libraries( scenedetect PkgConfig::LIBAV fmt )
 target_link_libraries( scenedetect PkgConfig::LIBAV )
