@@ -25,6 +25,7 @@
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavcodec/codec.h>
+#include <libavcodec/codec_par.h>
 #include <libavcodec/packet.h>
 #include <libavformat/avformat.h>
 #include <libavutil/avutil.h>
@@ -54,26 +55,27 @@ ForceInline void svprint(std::string_view strv) {
 
 void save_gray_frame(const uint8* __restrict buf, size_t stride, size_t xsize,
                      size_t ysize, const char* filename) {
-    FILE* file = fopen(filename, "w");
+    auto file =
+        std::unique_ptr<FILE, decltype([](FILE* f) { assert(!fclose(f)); })>(
+            fopen(filename, "w"));
+
     // writing the minimal required header for a pgm file format
     // portable graymap format ->
     // https://en.wikipedia.org/wiki/Netpbm_format#PGM_example
 
-    assert(fprintf(file, "P5\n%zu %zu\n255\n", xsize, ysize) > 0);
+    assert(fprintf(file.get(), "P5\n%zu %zu\n255\n", xsize, ysize) > 0);
 
     if (stride == xsize) {
-        auto filed = fileno(file);
+        auto filed = fileno(file.get());
         auto n_written = write(filed, buf, xsize * ysize);
         assert((n_written > 0) && ((size_t)n_written == (xsize * ysize)));
     } else {
         // writing line by line
         for (size_t i = 0; i < ysize; i++) {
-            assert(fwrite(buf, 1, xsize, file) == xsize);
+            assert(fwrite(buf, 1, xsize, file.get()) == xsize);
             buf += stride;
         }
     }
-
-    assert(!fclose(file));
 }
 
 // assumes each source plane has the same dimensions
@@ -127,13 +129,24 @@ int main(int argc, const char* argv[]) {
         return -1;
     }
 
-    auto* fctx = avformat_alloc_context();
+    AVFormatContext* fctx = nullptr;
 
+    // avformat_open_input() handles alloc and free for us
     if (avformat_open_input(&fctx, argv[1], nullptr, nullptr) != 0) {
         // nonzero return value means FAILURE
         svprint("avformat_open_input() returned failure, aborting...\n");
         return -1;
     }
+
+    assert(fctx);
+
+    // auto fctx_owned =
+    //     std::unique_ptr<AVFormatContext, decltype([](AVFormatContext* fc) {
+    //                         avformat_free_context(fc);
+    //                     })>(fctx);
+    auto fctx_owned =
+        std::unique_ptr<AVFormatContext, decltype(&avformat_free_context)>(
+            fctx, avformat_free_context);
 
     printf("Format %s, duration %lld us\n", fctx->iformat->long_name,
            fctx->duration);
@@ -244,6 +257,8 @@ int main(int argc, const char* argv[]) {
                    codec_ctx->frame_num, frame->pts, frame->pkt_dts,
                    frame->key_frame);
 
+            // TODO manually move this if to just another loop
+            // like decode first frame separately, then do rest of decode loop
             if (codec_ctx->frame_num > 1) {
                 // TODO assert all these strides and stuff are the same for
                 // both
@@ -273,9 +288,18 @@ int main(int argc, const char* argv[]) {
                 printf("abs_diff(): %d\n\n", diff);
             }
         }
-    }
 
-    avformat_free_context(fctx);
+        for (auto&& f : framebuf) {
+            av_frame_free(&f);
+        }
+        av_packet_free(&packet);
+
+        avcodec_free_context(&codec_ctx);
+
+        // for (size_t i = 0; i < 2; i++) {
+        //     av_frame_free(&framebuf[i]);
+        // }
+    }
 
     printf("Total time consumed: %lluns\n", time_ns);
 

@@ -13,6 +13,10 @@ Checks: "*,
         -readability-avoid-const-params-in-decls,
         -cppcoreguidelines-non-private-member-variables-in-classes,
         -misc-non-private-member-variables-in-classes,
+        -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+        -cppcoreguidelines-pro-type-vararg,
+        -hicpp-vararg,
+        -readability-identifier-length,
 "
 WarningsAsErrors: ''
 HeaderFilterRegex: ''

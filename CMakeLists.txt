@@ -9,10 +9,13 @@ set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
 set(CMAKE_COLOR_MAKEFILE TRUE)
 set(CMAKE_COLOR_DIAGNOSTICS ON)
 
-# add_compile_options(-fsanitize=address)
-# add_link_options(-fsanitize=address)
-# add_compile_options(-fsanitize=undefined)
-# add_link_options(-fsanitize=undefined)
+set(CMAKE_BUILD_TYPE Debug)
+
+add_compile_options(-fsanitize=address -fsanitize=undefined)
+add_link_options(-fsanitize=address -fsanitize=undefined)
+
+# add_compile_options(-fno-exceptions -fno-rtti)
+# add_link_options(-fno-exceptions -fno-rtti)
 
 # clang-tidy, cppcheck
 
@@ -29,13 +32,9 @@ pkg_check_modules(LIBAV REQUIRED IMPORTED_TARGET
     libavutil
 )
 
-# set(CMAKE_CXX_CPPCHECK "cppcheck")
-
-# add_subdirectory(third_party/fmt)
-
 
 add_executable(scenedetect main.cpp)
 
-target_compile_options(scenedetect PRIVATE -Wall -Wpedantic -Wextra -Wformat -Wformat-signedness)
+target_compile_options(scenedetect PRIVATE -Wall -Wpedantic -Wextra -Wformat)
 # target_link_libraries( scenedetect PkgConfig::LIBAV fmt )
 target_link_libraries( scenedetect PkgConfig::LIBAV )
