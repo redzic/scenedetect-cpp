@@ -17,6 +17,7 @@ Checks: "*,
         -cppcoreguidelines-pro-type-vararg,
         -hicpp-vararg,
         -readability-identifier-length,
+        -hicpp-signed-bitwise,
 "
 WarningsAsErrors: ''
 HeaderFilterRegex: ''

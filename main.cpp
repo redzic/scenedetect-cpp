@@ -29,6 +29,8 @@ extern "C" {
 #include <libavutil/frame.h>
 }
 
+namespace {
+
 struct DecodeContext {
     AVFormatContext* demuxer;
     AVStream* stream;
@@ -57,7 +59,7 @@ int print_pixel(DecodeContext* dc, AVFrame* frame) {
     return 0;
 }
 
-static int decode_read(DecodeContext* dc, int flush) {
+int decode_read(DecodeContext* dc, int flush) {
     const int ret_done = flush != 0 ? AVERROR_EOF : AVERROR(EAGAIN);
     int ret = 0;
 
@@ -210,6 +212,8 @@ fail:
     ds_free(dc);
     return ret;
 }
+
+} // namespace
 
 int main(int argc, char* argv[]) {
     if (argc != 2) {
