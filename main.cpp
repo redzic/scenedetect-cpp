@@ -17,6 +17,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <iostream>
 #include <iterator>
 #include <memory>
 #include <thread>
@@ -55,24 +56,23 @@ ForceInline void svprint(std::string_view strv) {
 
 void save_gray_frame(const uint8* __restrict buf, size_t stride, size_t xsize,
                      size_t ysize, const char* filename) {
-    auto file =
-        std::unique_ptr<FILE, decltype([](FILE* f) { assert(!fclose(f)); })>(
-            fopen(filename, "w"));
+    auto file = std::unique_ptr<FILE, decltype([](FILE* f) { fclose(f); })>(
+        fopen(filename, "w"));
 
     // writing the minimal required header for a pgm file format
     // portable graymap format ->
     // https://en.wikipedia.org/wiki/Netpbm_format#PGM_example
 
-    assert(fprintf(file.get(), "P5\n%zu %zu\n255\n", xsize, ysize) > 0);
+    fprintf(file.get(), "P5\n%zu %zu\n255\n", xsize, ysize);
 
     if (stride == xsize) {
         auto filed = fileno(file.get());
         auto n_written = write(filed, buf, xsize * ysize);
-        assert((n_written > 0) && ((size_t)n_written == (xsize * ysize)));
+        // assert (n_written > 0) && ((size_t)n_written == (xsize * ysize))
     } else {
         // writing line by line
         for (size_t i = 0; i < ysize; i++) {
-            assert(fwrite(buf, 1, xsize, file.get()) == xsize);
+            fwrite(buf, 1, xsize, file.get());
             buf += stride;
         }
     }
@@ -120,6 +120,8 @@ uint32 sum_abs_diff(const uint8* src1, const uint8* src2, size_t stride,
 } // namespace
 
 int main(int argc, const char* argv[]) {
+    auto get_time = []() { return std::chrono::high_resolution_clock::now(); };
+
     // struct that holds some data about the container (format)
     // does this have to be freed manually?
 
@@ -140,13 +142,10 @@ int main(int argc, const char* argv[]) {
 
     assert(fctx);
 
-    // auto fctx_owned =
-    //     std::unique_ptr<AVFormatContext, decltype([](AVFormatContext* fc) {
-    //                         avformat_free_context(fc);
-    //                     })>(fctx);
     auto fctx_owned =
-        std::unique_ptr<AVFormatContext, decltype(&avformat_free_context)>(
-            fctx, avformat_free_context);
+        std::unique_ptr<AVFormatContext, decltype([](AVFormatContext* fc) {
+                            avformat_free_context(fc);
+                        })>(fctx);
 
     printf("Format %s, duration %lld us\n", fctx->iformat->long_name,
            fctx->duration);
@@ -166,7 +165,6 @@ int main(int argc, const char* argv[]) {
         // find suitable decoder for the codec parameters
         const auto* codec = avcodec_find_decoder(codecpar->codec_id);
 
-        // fmt::print("{: >6} ", codec->name);
         printf("%s ", codec->name);
 
         bool skip_decode = true;
@@ -212,6 +210,7 @@ int main(int argc, const char* argv[]) {
         auto* packet = av_packet_alloc();
 
         // it really reads a packet basically
+        // TODO error handling
         while (av_read_frame(fctx, packet) >= 0) {
             if (packet->stream_index != (int)stream_idx) {
                 continue;
@@ -239,7 +238,10 @@ int main(int argc, const char* argv[]) {
                 continue;
             }
 
-            assert(!response);
+            if (response != 0) {
+                svprint("avcodec_receive_frame(): got bad response\n");
+                return -1;
+            }
 
             // so we are indeed decoding some frames
             // but like some of them aren't decoding properly
@@ -262,9 +264,7 @@ int main(int argc, const char* argv[]) {
             if (codec_ctx->frame_num > 1) {
                 // TODO assert all these strides and stuff are the same for
                 // both
-                auto get_time = []() {
-                    return std::chrono::high_resolution_clock::now();
-                };
+
                 auto start = get_time();
 
                 // Idea: average pixels in 8x8 blocks to avoid false
@@ -296,10 +296,13 @@ int main(int argc, const char* argv[]) {
 
         avcodec_free_context(&codec_ctx);
 
-        // for (size_t i = 0; i < 2; i++) {
-        //     av_frame_free(&framebuf[i]);
-        // }
+        for (size_t i = 0; i < 2; i++) {
+            av_frame_free(&framebuf[i]);
+        }
     }
+
+    // ok some AV1 files seem to just fail for some reason?
+    // very strange...
 
     printf("Total time consumed: %lluns\n", time_ns);
 
