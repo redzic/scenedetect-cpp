@@ -2,14 +2,12 @@ cmake_minimum_required(VERSION 3.26)
 
 project(scenedetect)
 
-set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
 set(CMAKE_COLOR_MAKEFILE TRUE)
 set(CMAKE_COLOR_DIAGNOSTICS ON)
-
-set(CMAKE_BUILD_TYPE Debug)
 
 
 # required for no dependencies on Windows (other than ffmpeg shared libs)
@@ -31,3 +29,4 @@ add_executable(scenedetect main.cpp)
 
 target_compile_options(scenedetect PRIVATE -Wall -Wpedantic -Wextra -Wformat)
 target_link_libraries( scenedetect PkgConfig::LIBAV )
+target_include_directories(scenedetect PRIVATE ./third_party/ffmpeg_build/include)
