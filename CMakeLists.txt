@@ -9,6 +9,10 @@ set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
 set(CMAKE_COLOR_MAKEFILE TRUE)
 set(CMAKE_COLOR_DIAGNOSTICS ON)
 
+# set(CMAKE_BUILD_TYPE Debug)
+
+# add_compile_options(-fsanitize=address -fsanitize=undefined)
+# add_link_options(-fsanitize=address -fsanitize=undefined)
 
 # required for no dependencies on Windows (other than ffmpeg shared libs)
 add_compile_options(-static-libstdc++ -static-libgcc -static)
