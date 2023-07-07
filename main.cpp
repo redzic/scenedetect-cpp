@@ -1,5 +1,7 @@
+#include <cassert>
 #include <cstdio>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <unistd.h>
 
@@ -30,30 +32,36 @@ struct VidDecCtx {
     AVPacket* pkt;
     AVFrame* frame;
 
-    // VidDecCtx& operator=(const VidDecCtx&) = default;
-    // VidDecCtx& operator=(const VidDecCtx&&) = default;
-    // VidDecCtx(VidDecCtx&&) = default;
-    // VidDecCtx(VidDecCtx&) = default;
-
     [[nodiscard]] static std::optional<VidDecCtx> open(const char* url) {
-        auto* pkt = av_packet_alloc();
-        auto* frame = av_frame_alloc();
-
+        // any way to reduce this boilerplate? jeez...
+        auto pkt = std::unique_ptr<AVPacket, decltype([](AVPacket* pkt) {
+                                       av_packet_free(&pkt);
+                                   })>(av_packet_alloc());
+        auto frame = std::unique_ptr<AVFrame, decltype([](AVFrame* frame) {
+                                         av_frame_free(&frame);
+                                     })>(av_frame_alloc());
+        // this should work with the way smart pointers work right?
         if ((pkt == nullptr) || (frame == nullptr)) {
             return {};
         }
 
-        AVFormatContext* demuxer = nullptr;
+        AVFormatContext* raw_demuxer = nullptr;
 
-        // pass NULL demuxer, in which case avformat_open_input() automatically
-        // allocates the AVFormatContext for us
-        if (avformat_open_input(&demuxer, url, nullptr, nullptr) < 0) {
+        // avformat_open_input automatically frees on failure so we construct
+        // the smart pointer AFTER this expression.
+        if (avformat_open_input(&raw_demuxer, url, nullptr, nullptr) < 0) {
             // these returns need to, like...
             // destruct the object properly
             return {};
         }
 
-        avformat_find_stream_info(demuxer, nullptr);
+        assert(raw_demuxer != nullptr);
+        auto demuxer =
+            std::unique_ptr<AVFormatContext, decltype([](AVFormatContext* ctx) {
+                                avformat_free_context(ctx);
+                            })>(raw_demuxer);
+
+        avformat_find_stream_info(demuxer.get(), nullptr);
         // find stream idx of video stream
         // TODO rewrite this in a less error-prone way.
         int stream_idx = -1;
@@ -67,7 +75,7 @@ struct VidDecCtx {
             return {};
         }
 
-        // index is stored in stream.index
+        // index is stored in AVStream->index
         auto* stream = demuxer->streams[stream_idx];
 
         const auto* codec = avcodec_find_decoder(stream->codecpar->codec_id);
@@ -75,14 +83,20 @@ struct VidDecCtx {
             return {};
         }
 
-        auto* decoder = avcodec_alloc_context3(codec);
+        auto decoder =
+            std::unique_ptr<AVCodecContext, decltype([](AVCodecContext* ctx) {
+                                avcodec_free_context(&ctx);
+                            })>(avcodec_alloc_context3(codec));
+
         decoder->thread_count = 0;
 
-        if (avcodec_parameters_to_context(decoder, stream->codecpar) < 0) {
+        if (avcodec_parameters_to_context(decoder.get(), stream->codecpar) <
+            0) {
             return {};
         }
 
-        return VidDecCtx(demuxer, stream, decoder, pkt, frame);
+        return VidDecCtx(demuxer.release(), stream, decoder.release(),
+                         pkt.release(), frame.release());
     }
 
     // For some seemingly inexplicable reason, having this destructor present
