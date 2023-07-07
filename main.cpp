@@ -88,12 +88,13 @@ struct VidDecCtx {
                                 avcodec_free_context(&ctx);
                             })>(avcodec_alloc_context3(codec));
 
-        decoder->thread_count = 0;
-
         if (avcodec_parameters_to_context(decoder.get(), stream->codecpar) <
             0) {
             return {};
         }
+
+        // set automatic threading
+        decoder->thread_count = 0;
 
         return VidDecCtx(demuxer.release(), stream, decoder.release(),
                          pkt.release(), frame.release());
