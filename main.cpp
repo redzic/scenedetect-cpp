@@ -58,7 +58,7 @@ struct VidDecCtx {
         assert(raw_demuxer != nullptr);
         auto demuxer =
             std::unique_ptr<AVFormatContext, decltype([](AVFormatContext* ctx) {
-                                avformat_free_context(ctx);
+                                avformat_close_input(&ctx);
                             })>(raw_demuxer);
 
         avformat_find_stream_info(demuxer.get(), nullptr);
