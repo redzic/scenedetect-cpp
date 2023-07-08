@@ -22,6 +22,10 @@ inline void w_stderr(std::string_view sv) {
     write(STDERR_FILENO, sv.data(), sv.size());
 }
 
+template <typename T, auto Alloc, auto Free> auto make_managed() {
+    return std::unique_ptr<T, decltype([](T* ptr) { Free(&ptr); })>(Alloc());
+}
+
 // VideoDecodeContext
 struct VidDecCtx {
     // all fields are owned and must be non-null
@@ -33,13 +37,9 @@ struct VidDecCtx {
     AVFrame* frame;
 
     [[nodiscard]] static std::optional<VidDecCtx> open(const char* url) {
-        // any way to reduce this boilerplate? jeez...
-        auto pkt = std::unique_ptr<AVPacket, decltype([](AVPacket* pkt) {
-                                       av_packet_free(&pkt);
-                                   })>(av_packet_alloc());
-        auto frame = std::unique_ptr<AVFrame, decltype([](AVFrame* frame) {
-                                         av_frame_free(&frame);
-                                     })>(av_frame_alloc());
+        auto pkt = make_managed<AVPacket, av_packet_alloc, av_packet_free>();
+        auto frame = make_managed<AVFrame, av_frame_alloc, av_frame_free>();
+
         // this should work with the way smart pointers work right?
         if ((pkt == nullptr) || (frame == nullptr)) {
             return {};
@@ -62,15 +62,19 @@ struct VidDecCtx {
                             })>(raw_demuxer);
 
         avformat_find_stream_info(demuxer.get(), nullptr);
+
         // find stream idx of video stream
-        // TODO rewrite this in a less error-prone way.
-        int stream_idx = -1;
-        for (unsigned int sidx = 0; sidx < demuxer->nb_streams; sidx++) {
-            if (demuxer->streams[sidx]->codecpar->codec_type ==
-                AVMEDIA_TYPE_VIDEO) {
-                stream_idx = static_cast<int>(sidx);
+        int stream_idx = [](AVFormatContext* demuxer) {
+            for (unsigned int stream_idx = 0; stream_idx < demuxer->nb_streams;
+                 stream_idx++) {
+                if (demuxer->streams[stream_idx]->codecpar->codec_type ==
+                    AVMEDIA_TYPE_VIDEO) {
+                    return static_cast<int>(stream_idx);
+                }
             }
-        }
+            return -1;
+        }(demuxer.get());
+
         if (stream_idx < 0) {
             return {};
         }
@@ -140,6 +144,13 @@ int main(int argc, char** argv) {
     // bro how on earth is the exit code being set to
     // something other than 0???
     auto vdec = VidDecCtx::open(url);
+
+    // so as soon as you use something like std::cout, the binary size increases
+    // greatly...
+
+    // so we should probably find a way to not use things that increase the
+    // binary size a lot...
+
     if (vdec) {
         w_stdout("Decoder object constructed\n");
     } else {
