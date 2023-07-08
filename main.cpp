@@ -1,9 +1,13 @@
+#include <array>
 #include <cassert>
+#include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <iostream>
 #include <memory>
 #include <optional>
 #include <unistd.h>
+#include <variant>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -26,6 +30,31 @@ template <typename T, auto Alloc, auto Free> auto make_managed() {
     return std::unique_ptr<T, decltype([](T* ptr) { Free(&ptr); })>(Alloc());
 }
 
+struct DecoderCreationError {
+    enum DCErrorType : uint8_t {
+        AllocationFailure,
+        NoVideoStream,
+        NoDecoderAvailable,
+        AVError
+    } type;
+    int averror = 0;
+
+    [[nodiscard]] constexpr std::string_view errmsg() const {
+        static constexpr std::string_view errmsg_sv[] = {
+            [AllocationFailure] = "Allocation Failure in decoder construction",
+            [NoVideoStream] = "No video stream exists in input file",
+            [NoDecoderAvailable] = "No decoder available for codec",
+            [AVError] = "Unspecified AVError occurred",
+        };
+
+        // if (this->type != AVError) {
+        return errmsg_sv[this->type];
+        // }
+
+        // return "";
+    }
+};
+
 // VideoDecodeContext
 struct VidDecCtx {
     // all fields are owned and must be non-null
@@ -36,23 +65,28 @@ struct VidDecCtx {
     AVPacket* pkt;
     AVFrame* frame;
 
-    [[nodiscard]] static std::optional<VidDecCtx> open(const char* url) {
+    // it seems that using std::variant cuases a bun
+    [[nodiscard]] static std::variant<VidDecCtx, DecoderCreationError>
+    open(const char* url) {
         auto pkt = make_managed<AVPacket, av_packet_alloc, av_packet_free>();
         auto frame = make_managed<AVFrame, av_frame_alloc, av_frame_free>();
 
         // this should work with the way smart pointers work right?
         if ((pkt == nullptr) || (frame == nullptr)) {
-            return {};
+            return {DecoderCreationError{
+                .type = DecoderCreationError::AllocationFailure}};
         }
 
         AVFormatContext* raw_demuxer = nullptr;
 
         // avformat_open_input automatically frees on failure so we construct
         // the smart pointer AFTER this expression.
-        if (avformat_open_input(&raw_demuxer, url, nullptr, nullptr) < 0) {
-            // these returns need to, like...
-            // destruct the object properly
-            return {};
+        {
+            int ret = avformat_open_input(&raw_demuxer, url, nullptr, nullptr);
+            if (ret < 0) {
+                return {DecoderCreationError{
+                    .type = DecoderCreationError::AVError, .averror = ret}};
+            }
         }
 
         assert(raw_demuxer != nullptr);
@@ -76,7 +110,9 @@ struct VidDecCtx {
         }(demuxer.get());
 
         if (stream_idx < 0) {
-            return {};
+            return {DecoderCreationError{
+                .type = DecoderCreationError::NoVideoStream,
+            }};
         }
 
         // index is stored in AVStream->index
@@ -84,7 +120,9 @@ struct VidDecCtx {
 
         const auto* codec = avcodec_find_decoder(stream->codecpar->codec_id);
         if (codec == nullptr) {
-            return {};
+            return {DecoderCreationError{
+                .type = DecoderCreationError::NoDecoderAvailable,
+            }};
         }
 
         auto decoder =
@@ -92,9 +130,13 @@ struct VidDecCtx {
                                 avcodec_free_context(&ctx);
                             })>(avcodec_alloc_context3(codec));
 
-        if (avcodec_parameters_to_context(decoder.get(), stream->codecpar) <
-            0) {
-            return {};
+        {
+            int ret =
+                avcodec_parameters_to_context(decoder.get(), stream->codecpar);
+            if (ret < 0) {
+                return {DecoderCreationError{
+                    .type = DecoderCreationError::AVError, .averror = ret}};
+            }
         }
 
         // set automatic threading
@@ -124,9 +166,9 @@ struct VidDecCtx {
 // so it seems like you have to call
 // unref before you reuse AVPacket or AVFrame
 
-void segvHandler(int s) {
+void segvHandler(int) {
     w_stderr("Segmentation Fault\n");
-    exit(EXIT_FAILURE);
+    std::quick_exit(EXIT_FAILURE);
 }
 
 int main(int argc, char** argv) {
@@ -151,11 +193,27 @@ int main(int argc, char** argv) {
     // so we should probably find a way to not use things that increase the
     // binary size a lot...
 
-    if (vdec) {
+    if (std::holds_alternative<VidDecCtx>(vdec)) {
         w_stdout("Decoder object constructed\n");
-    } else {
-        w_stdout("not present\n");
-    }
+    } else if (std::holds_alternative<DecoderCreationError>(vdec)) {
+        auto error = std::get<DecoderCreationError>(vdec);
 
-    return 0;
+        if (error.type == DecoderCreationError::AVError) {
+            std::array<char, 512> errbuf{};
+            av_make_error_string(errbuf.data(), errbuf.size(), error.averror);
+            std::cerr << "Decoder failed to construct: " << errbuf.data()
+                      << '\n';
+        } else {
+            // this use of cerr causes a shit ton of extra code to be generated.
+            // so remove later if possible.
+            std::cerr << "Decoder failed to construct: " << error.errmsg()
+                      << '\n';
+        }
+
+    } else {
+        // TODO perhaps try to figure out a way to do this that doesn't require
+        // this hack. Without this the compiler generates unnecessary code in
+        // the variant type check and doesn't optimize things perfectly.
+        __builtin_unreachable();
+    }
 }
