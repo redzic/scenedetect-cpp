@@ -1,5 +1,7 @@
 #include <array>
 #include <cassert>
+#include <cerrno>
+#include <chrono>
 #include <corecrt.h>
 #include <csignal>
 #include <cstdint>
@@ -184,15 +186,19 @@ struct DecodeContext {
     }
 };
 
-uint32_t calc_frame_sum(const uint8_t* ptr, size_t xsize, size_t ysize,
-                        size_t stride) {
+// Assumes same dimensions between frames
+uint32_t calc_frame_sad(const uint8_t* __restrict ptr1,
+                        const uint8_t* __restrict ptr2, size_t xsize,
+                        size_t ysize, size_t stride) {
     uint32_t sum = 0;
     while (ysize-- != 0) {
         for (size_t i = 0; i < xsize; i++) {
-            sum += ptr[i];
+            sum += std::abs(static_cast<int32_t>(ptr1[i]) -
+                            static_cast<int32_t>(ptr2[i]));
         }
 
-        ptr += stride;
+        ptr1 += stride;
+        ptr2 += stride;
     }
 
     return sum;
@@ -213,14 +219,45 @@ int run_decoder(DecodeContext& dc) {
     // start off with first conceptual frame = 0 index
     int accessor_offset = 0;
 
-    auto get_sum = [](AVFrame* f) {
-        return calc_frame_sum(f->data[0], f->width, f->height, f->linesize[0]);
+    auto get_sad = [](AVFrame* f1, AVFrame* f2) {
+        return calc_frame_sad(f1->data[0], f2->data[0], f1->width, f1->height,
+                              f1->linesize[0]);
+    };
+
+    auto receive_frames = [&dc, accessor_offset, get_sad]() mutable {
+        // receive last frames
+        while (true) {
+            // ret = avcodec_receive_frame(dc.decoder, dc.framebuf[0]);
+
+            int ret = avcodec_receive_frame(dc.decoder,
+                                            dc.framebuf[1 ^ accessor_offset]);
+
+            if (ret < 0) [[unlikely]] {
+                return ret;
+            }
+
+            if (dc.decoder->frame_num > 1) [[likely]] {
+                // use adjacent pair of frames
+
+                auto s1 = get_sad(dc.framebuf[0 ^ accessor_offset],
+                                  dc.framebuf[1 ^ accessor_offset]);
+
+                printf("Frame Pair SAD: %d\n", s1);
+
+                av_frame_unref(dc.framebuf[0 ^ accessor_offset]);
+            } else {
+                // no unref needed, second frame is already unref
+                // and first frame is needed next iteration
+            }
+
+            accessor_offset ^= 1;
+        }
     };
 
     while (true) {
         // Get packet (compressed data) from demuxer
-        ret = av_read_frame(dc.demuxer, dc.pkt);
-        // EOF
+        int ret = av_read_frame(dc.demuxer, dc.pkt);
+        // EOF in compressed data
         if (ret < 0) [[unlikely]] {
             break;
         }
@@ -233,91 +270,23 @@ int run_decoder(DecodeContext& dc) {
 
         // Send the compressed data to the decoder
         ret = avcodec_send_packet(dc.decoder, dc.pkt);
-        if (ret < 0) [[unlikely]] {
+        if (ret < 0) {
             // Error decoding frame
             av_packet_unref(dc.pkt);
-            w_stdout("Error decoding frame!\n");
+
+            w_stdout("Error decoding frame!\nError was not EAGAIN\n");
+
             return ret;
         } else {
             av_packet_unref(dc.pkt);
         }
 
-        // av_frame_unref() is called automatically by this function
-        ret =
-            avcodec_receive_frame(dc.decoder, dc.framebuf[1 ^ accessor_offset]);
-
-        if (ret == AVERROR(EAGAIN)) [[unlikely]] {
-            // need to send more data
-            continue;
-        }
-
-        if (ret < 0) [[unlikely]] {
-            return ret;
-        }
-
-        if (dc.decoder->frame_num > 1) [[likely]] {
-            // use adjacent pair of frames
-
-            auto s1 = get_sum(dc.framebuf[0 ^ accessor_offset]);
-            auto s2 = get_sum(dc.framebuf[1 ^ accessor_offset]);
-
-            printf("Frame Pair: [%d, %d]\n", s1, s2);
-
-            av_frame_unref(dc.framebuf[0 ^ accessor_offset]);
-        } else {
-            // no unref needed, second frame is already unref
-            // and first frame is needed next iteration
-        }
-
-        // dc.framebuf[0]->display_picture_number
-
-        // use frame
-        // printf("Got frame %lld: %dx%d, stride %d\n", dc.decoder->frame_num,
-        //        dc.framebuf[0]->width, dc.framebuf[0]->height,
-        //        dc.framebuf[0]->linesize[0]);
-
-        // swap access order of frames
-        accessor_offset ^= 1;
+        receive_frames();
     }
 
     // send flush packet
     avcodec_send_packet(dc.decoder, nullptr);
-
-    // receive last frames
-    while (true) {
-        // ret = avcodec_receive_frame(dc.decoder, dc.framebuf[0]);
-
-        ret =
-            avcodec_receive_frame(dc.decoder, dc.framebuf[1 ^ accessor_offset]);
-
-        // cannot be EAGAIN since we sent everything
-        if (ret == AVERROR_EOF) [[unlikely]] {
-            return 0;
-        } else if (ret < 0) [[unlikely]] {
-            return ret;
-        }
-
-        // can use frame now
-        // printf("Got frame %lld: %dx%d, stride %d\n", dc.decoder->frame_num,
-        //        dc.framebuf[0]->width, dc.framebuf[0]->height,
-        //        dc.framebuf[0]->linesize[0]);
-
-        if (dc.decoder->frame_num > 1) [[likely]] {
-            // use adjacent pair of frames
-
-            auto s1 = get_sum(dc.framebuf[0 ^ accessor_offset]);
-            auto s2 = get_sum(dc.framebuf[1 ^ accessor_offset]);
-
-            printf("Frame Pair: [%d, %d]\n", s1, s2);
-
-            av_frame_unref(dc.framebuf[0 ^ accessor_offset]);
-        } else {
-            // no unref needed, second frame is already unref
-            // and first frame is needed next iteration
-        }
-
-        accessor_offset ^= 1;
-    }
+    receive_frames();
 
     return 0;
 }
@@ -338,6 +307,15 @@ void segvHandler(int /*unused*/) {
 }
 
 template <class> inline constexpr bool always_false_v = false;
+
+template <class result_t = std::chrono::milliseconds,
+          class clock_t = std::chrono::steady_clock,
+          class duration_t = std::chrono::milliseconds>
+auto since(std::chrono::time_point<clock_t, duration_t> const& start) {
+    return std::chrono::duration_cast<result_t>(clock_t::now() - start);
+}
+
+auto now() { return std::chrono::steady_clock::now(); }
 
 int main(int argc, char** argv) {
     if (signal(SIGSEGV, segvHandler) == SIG_ERR) {
@@ -370,12 +348,20 @@ int main(int argc, char** argv) {
             using T = std::decay_t<decltype(arg)>;
 
             if constexpr (std::is_same_v<T, DecodeContext>) {
-                auto& decoder = arg;
+                auto& d_ctx = arg;
 
                 w_stdout("DecodeContext held in std::variant<>\n");
 
-                int ret = run_decoder(decoder);
-                printf("Return value: %d\n", ret);
+                auto start = now();
+                int ret = run_decoder(d_ctx);
+                auto elapsed_ms = since(start).count();
+
+                if (ret == 0) {
+                    printf("Successfully decoded %d frames in %lld ms\n",
+                           (int)d_ctx.decoder->frame_num, elapsed_ms);
+                } else {
+                    printf("Decoding error! value: %d\n", ret);
+                }
 
             } else if constexpr (std::is_same_v<T, DecoderCreationError>) {
                 auto error = arg;
