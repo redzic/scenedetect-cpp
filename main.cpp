@@ -1,5 +1,6 @@
 #include <array>
 #include <cassert>
+#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -7,6 +8,7 @@
 #include <memory>
 #include <optional>
 #include <unistd.h>
+#include <utility>
 #include <variant>
 
 extern "C" {
@@ -47,34 +49,79 @@ struct DecoderCreationError {
             [AVError] = "Unspecified AVError occurred",
         };
 
-        // if (this->type != AVError) {
         return errmsg_sv[this->type];
-        // }
-
-        // return "";
     }
 };
 
-// VideoDecodeContext
-struct VidDecCtx {
+// OWNED object
+struct DecodeContext {
     // all fields are owned and must be non-null
-    AVFormatContext* demuxer;
-    AVStream* stream;
-    AVCodecContext* decoder;
 
-    AVPacket* pkt;
-    AVFrame* frame;
+    // these fields can be null
+    AVFormatContext* demuxer{nullptr};
+    AVStream* stream{nullptr};
+    AVCodecContext* decoder{nullptr};
 
-    // it seems that using std::variant cuases a bun
-    [[nodiscard]] static std::variant<VidDecCtx, DecoderCreationError>
+    AVPacket* pkt{nullptr};
+    AVFrame* frame{nullptr};
+
+    DecodeContext() = default;
+
+    DecodeContext(DecodeContext&& source) noexcept
+        : demuxer(source.demuxer), stream(source.stream),
+          decoder(source.decoder), pkt(source.pkt), frame(source.frame) {
+        source.demuxer = nullptr;
+        source.stream = nullptr;
+        source.decoder = nullptr;
+        source.pkt = nullptr;
+        source.frame = nullptr;
+    };
+
+    // copy assignment operator
+    DecodeContext& operator=(const DecodeContext&) = delete;
+    // move assignment operator
+    DecodeContext& operator=(const DecodeContext&&) = delete;
+
+    DecodeContext(DecodeContext&) = delete;
+
+    // For some seemingly inexplicable reason, having this destructor present
+    // seems to cause some extremely weird issues to happen where a nonzero
+    // exit code is returned from main. This doesn't happen when deleting the
+    // destructor.
+
+    // umm... why the crap is this being called multiple times bro?
+    // constexpr
+    constexpr ~DecodeContext() {
+        // This object might be moved from another object, in which case
+        // these fields are null.
+        if (frame != nullptr) {
+            av_frame_free(&frame);
+        }
+        if (pkt != nullptr) {
+            av_packet_free(&pkt);
+        }
+        if (decoder != nullptr) {
+            avcodec_free_context(&decoder);
+        }
+        if (demuxer != nullptr) {
+            avformat_close_input(&demuxer);
+        }
+    }
+
+    DecodeContext(AVFormatContext* demuxer_, AVStream* stream_,
+                  AVCodecContext* decoder_, AVPacket* pkt_, AVFrame* frame_)
+        : demuxer(demuxer_), stream(stream_), decoder(decoder_), pkt(pkt_),
+          frame(frame_) {}
+
+    [[nodiscard]] static std::variant<DecodeContext, DecoderCreationError>
     open(const char* url) {
         auto pkt = make_managed<AVPacket, av_packet_alloc, av_packet_free>();
         auto frame = make_managed<AVFrame, av_frame_alloc, av_frame_free>();
 
         // this should work with the way smart pointers work right?
         if ((pkt == nullptr) || (frame == nullptr)) {
-            return {DecoderCreationError{
-                .type = DecoderCreationError::AllocationFailure}};
+            return DecoderCreationError{
+                .type = DecoderCreationError::AllocationFailure};
         }
 
         AVFormatContext* raw_demuxer = nullptr;
@@ -142,37 +189,41 @@ struct VidDecCtx {
         // set automatic threading
         decoder->thread_count = 0;
 
-        return VidDecCtx(demuxer.release(), stream, decoder.release(),
-                         pkt.release(), frame.release());
-    }
+        std::variant<DecodeContext, DecoderCreationError> ret{
+            std::in_place_type<DecodeContext>,
+            demuxer.release(),
+            stream,
+            decoder.release(),
+            pkt.release(),
+            frame.release()};
 
-    // For some seemingly inexplicable reason, having this destructor present
-    // seems to cause some extremely weird issues to happen where a nonzero
-    // exit code is returned from main. This doesn't happen when deleting the
-    // destructor.
-    ~VidDecCtx() {
-        av_frame_free(&frame);
-        av_packet_free(&pkt);
-        avcodec_free_context(&decoder);
-        avformat_close_input(&demuxer);
+        return ret;
     }
+};
 
-    VidDecCtx(auto demuxer_, auto stream_, auto decoder_, auto pkt_,
-              auto frame_)
-        : demuxer(demuxer_), stream(stream_), decoder(decoder_), pkt(pkt_),
-          frame(frame_) {}
+struct DecodeContextResult {
+    // This will just have nullptr fields
+    DecodeContext dc;
+    // if err.averror was non
+    DecoderCreationError err;
 };
 
 // so it seems like you have to call
 // unref before you reuse AVPacket or AVFrame
 
-void segvHandler(int) {
+void segvHandler(int /*unused*/) {
     w_stderr("Segmentation Fault\n");
-    std::quick_exit(EXIT_FAILURE);
+    exit(EXIT_FAILURE); // NOLINT
 }
 
+template <class> inline constexpr bool always_false_v = false;
+
 int main(int argc, char** argv) {
-    signal(SIGSEGV, segvHandler);
+    if (signal(SIGSEGV, segvHandler) == SIG_ERR) {
+        w_stderr(
+            "signal(): failed to set SIGSEGV signal handler, aborting...\n");
+        return -1;
+    }
 
     if (argc != 2) {
         w_stderr("scenedetect-cpp: invalid number of arguments\n"
@@ -185,7 +236,7 @@ int main(int argc, char** argv) {
 
     // bro how on earth is the exit code being set to
     // something other than 0???
-    auto vdec = VidDecCtx::open(url);
+    auto vdec = DecodeContext::open(url);
 
     // so as soon as you use something like std::cout, the binary size increases
     // greatly...
@@ -193,27 +244,34 @@ int main(int argc, char** argv) {
     // so we should probably find a way to not use things that increase the
     // binary size a lot...
 
-    if (std::holds_alternative<VidDecCtx>(vdec)) {
-        w_stdout("Decoder object constructed\n");
-    } else if (std::holds_alternative<DecoderCreationError>(vdec)) {
-        auto error = std::get<DecoderCreationError>(vdec);
+    std::visit(
+        [](auto&& arg) {
+            using T = std::decay_t<decltype(arg)>;
 
-        if (error.type == DecoderCreationError::AVError) {
-            std::array<char, 512> errbuf{};
-            av_make_error_string(errbuf.data(), errbuf.size(), error.averror);
-            std::cerr << "Decoder failed to construct: " << errbuf.data()
-                      << '\n';
-        } else {
-            // this use of cerr causes a shit ton of extra code to be generated.
-            // so remove later if possible.
-            std::cerr << "Decoder failed to construct: " << error.errmsg()
-                      << '\n';
-        }
+            if constexpr (std::is_same_v<T, DecodeContext>) {
+                std::cout << "DecodeContext held in std::variant<>\n";
+            } else if constexpr (std::is_same_v<T, DecoderCreationError>) {
+                auto error = arg;
 
-    } else {
-        // TODO perhaps try to figure out a way to do this that doesn't require
-        // this hack. Without this the compiler generates unnecessary code in
-        // the variant type check and doesn't optimize things perfectly.
-        __builtin_unreachable();
-    }
+                if (error.type == DecoderCreationError::AVError) {
+                    std::array<char, 512> errbuf{};
+                    av_make_error_string(errbuf.data(), errbuf.size(),
+                                         error.averror);
+                    std::cerr
+                        << "Decoder failed to construct: " << errbuf.data()
+                        << '\n';
+                } else {
+                    // this use of cerr causes a shit ton of extra code to be
+                    // generated.
+                    // so remove later if possible.
+                    std::cerr
+                        << "Decoder failed to construct: " << error.errmsg()
+                        << '\n';
+                }
+
+            } else {
+                static_assert(always_false_v<T>);
+            }
+        },
+        vdec);
 }
