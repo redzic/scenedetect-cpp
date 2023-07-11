@@ -15,8 +15,13 @@ set(CMAKE_COLOR_DIAGNOSTICS ON)
 # add_link_options(-fsanitize=address -fsanitize=undefined)
 
 # required for no dependencies on Windows (other than ffmpeg shared libs)
-add_compile_options(-static-libstdc++ -static-libgcc -static -fno-exceptions -fno-rtti)
-add_link_options(-static-libstdc++ -static-libgcc -static -fno-exceptions -fno-rtti)
+
+# compile options needed for self-contained binary
+add_compile_options(-static-libstdc++ -static-libgcc -static)
+add_link_options(-static-libstdc++ -static-libgcc -static)
+
+add_compile_options(-fno-exceptions -fno-rtti)
+add_link_options(-fno-exceptions -fno-rtti)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBAV REQUIRED IMPORTED_TARGET

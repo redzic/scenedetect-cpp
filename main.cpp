@@ -174,6 +174,8 @@ struct DecodeContext {
     }
 };
 
+// how do you make a static allocation?
+
 // assume DecodeContext is not in a moved-from state.
 int run_decoder(DecodeContext& dc) {
     // AVCodecContext allocated with alloc context
@@ -192,8 +194,7 @@ int run_decoder(DecodeContext& dc) {
             break;
         }
 
-        // If packet contains some other bullshit
-        // get that the fuck out of here
+        // skip packets other than the ones we're interested in
         if (dc.pkt->stream_index != dc.stream->index) {
             av_packet_unref(dc.pkt);
             continue;
@@ -203,10 +204,12 @@ int run_decoder(DecodeContext& dc) {
         ret = avcodec_send_packet(dc.decoder, dc.pkt);
         if (ret < 0) {
             // Error decoding frame
-            printf("Error decoding frame!\n");
+            av_packet_unref(dc.pkt);
+            w_stdout("Error decoding frame!\n");
             return ret;
+        } else {
+            av_packet_unref(dc.pkt);
         }
-        av_packet_unref(dc.pkt);
 
         // av_frame_unref() is called automatically by this function
         ret = avcodec_receive_frame(dc.decoder, dc.frame);
@@ -221,7 +224,7 @@ int run_decoder(DecodeContext& dc) {
         }
 
         // can use frame now
-        printf("Got frame %d: %dx%d, stride %d\n", dc.decoder->frame_num,
+        printf("Got frame %lld: %dx%d, stride %d\n", dc.decoder->frame_num,
                dc.frame->width, dc.frame->height, dc.frame->linesize[0]);
 
         av_frame_unref(dc.frame);
@@ -241,7 +244,7 @@ int run_decoder(DecodeContext& dc) {
         }
 
         // can use frame now
-        printf("Got frame %d: %dx%d, stride %d\n", dc.decoder->frame_num,
+        printf("Got frame %lld: %dx%d, stride %d\n", dc.decoder->frame_num,
                dc.frame->width, dc.frame->height, dc.frame->linesize[0]);
 
         av_frame_unref(dc.frame);
@@ -300,7 +303,7 @@ int main(int argc, char** argv) {
             if constexpr (std::is_same_v<T, DecodeContext>) {
                 auto& decoder = arg;
 
-                printf("DecodeContext held in std::variant<>\n");
+                w_stdout("DecodeContext held in std::variant<>\n");
 
                 int ret = run_decoder(decoder);
                 printf("Return value: %d\n", ret);
@@ -313,13 +316,14 @@ int main(int argc, char** argv) {
                     av_make_error_string(errbuf.data(), errbuf.size(),
                                          error.averror);
 
-                    fprintf(stderr, "Failed to initialize decoder: %s\n",
-                            errbuf.data());
+                    (void)fprintf(stderr, "Failed to initialize decoder: %s\n",
+                                  errbuf.data());
 
                 } else {
-
-                    fprintf(stderr, "Failed to initialize decoder: %s\n",
-                            error.errmsg());
+                    std::string_view errmsg = error.errmsg();
+                    (void)fprintf(stderr,
+                                  "Failed to initialize decoder: %.*s\n",
+                                  (int)errmsg.size(), errmsg.data());
                 }
 
             } else {
