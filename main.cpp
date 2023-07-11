@@ -206,6 +206,9 @@ uint32_t calc_frame_sad(const uint8_t* __restrict ptr1,
 
 // how do you make a static allocation?
 
+// Move cursor up and erase line
+#define ERASE_LINE_ANSI "\x1B[1A\x1B[2K"
+
 // assume DecodeContext is not in a moved-from state.
 int run_decoder(DecodeContext& dc) {
     // AVCodecContext allocated with alloc context
@@ -224,6 +227,8 @@ int run_decoder(DecodeContext& dc) {
                               f1->linesize[0]);
     };
 
+    int last_frame = 0;
+
     auto receive_frames = [&dc, accessor_offset, get_sad]() mutable {
         // receive last frames
         while (true) {
@@ -239,10 +244,10 @@ int run_decoder(DecodeContext& dc) {
             if (dc.decoder->frame_num > 1) [[likely]] {
                 // use adjacent pair of frames
 
-                auto s1 = get_sad(dc.framebuf[0 ^ accessor_offset],
-                                  dc.framebuf[1 ^ accessor_offset]);
+                // auto s1 = get_sad(dc.framebuf[0 ^ accessor_offset],
+                //                   dc.framebuf[1 ^ accessor_offset]);
 
-                printf("Frame Pair SAD: %d\n", s1);
+                // printf("Frame Pair SAD: %d\n", s1);
 
                 av_frame_unref(dc.framebuf[0 ^ accessor_offset]);
             } else {
@@ -253,6 +258,8 @@ int run_decoder(DecodeContext& dc) {
             accessor_offset ^= 1;
         }
     };
+
+    printf("Received 0 frames so far\n");
 
     while (true) {
         // Get packet (compressed data) from demuxer
@@ -282,11 +289,20 @@ int run_decoder(DecodeContext& dc) {
         }
 
         receive_frames();
+
+        if (dc.decoder->frame_num - last_frame > 40) {
+            last_frame = (int)dc.decoder->frame_num;
+
+            printf(ERASE_LINE_ANSI "Received %d frames so far\n", last_frame);
+        }
     }
 
     // send flush packet
     avcodec_send_packet(dc.decoder, nullptr);
     receive_frames();
+
+    printf(ERASE_LINE_ANSI "Received %d frames so far\n",
+           (int)dc.decoder->frame_num);
 
     return 0;
 }
@@ -356,9 +372,15 @@ int main(int argc, char** argv) {
                 int ret = run_decoder(d_ctx);
                 auto elapsed_ms = since(start).count();
 
+                auto frames = d_ctx.decoder->frame_num;
+
                 if (ret == 0) {
-                    printf("Successfully decoded %d frames in %lld ms\n",
-                           (int)d_ctx.decoder->frame_num, elapsed_ms);
+                    double fps = static_cast<double>(frames) /
+                                 (static_cast<double>(elapsed_ms) / 1000.0);
+
+                    printf(
+                        "Successfully decoded %d frames in %lld ms (%f fps)\n",
+                        (int)frames, elapsed_ms, fps);
                 } else {
                     printf("Decoding error! value: %d\n", ret);
                 }
