@@ -1,5 +1,6 @@
 #include <array>
 #include <cassert>
+#include <corecrt.h>
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
@@ -52,6 +53,8 @@ struct DecoderCreationError {
     }
 };
 
+using FrameBuf = std::array<AVFrame*, 2>;
+
 struct DecodeContext {
     // these fields can be null
     AVFormatContext* demuxer{nullptr};
@@ -59,7 +62,7 @@ struct DecodeContext {
     AVCodecContext* decoder{nullptr};
 
     AVPacket* pkt{nullptr};
-    AVFrame* frame{nullptr};
+    FrameBuf framebuf{};
 
     constexpr DecodeContext() = default;
 
@@ -77,24 +80,29 @@ struct DecodeContext {
     constexpr ~DecodeContext() {
         // Since we deleted all the copy/move constructors,
         // we can do this without handling a "moved from" case.
-        av_frame_free(&frame);
+
+        for (auto* f : framebuf) {
+            av_frame_free(&f);
+        }
+
         av_packet_free(&pkt);
         avcodec_free_context(&decoder);
         avformat_close_input(&demuxer);
     }
 
     DecodeContext(AVFormatContext* demuxer_, AVStream* stream_,
-                  AVCodecContext* decoder_, AVPacket* pkt_, AVFrame* frame_)
+                  AVCodecContext* decoder_, AVPacket* pkt_, FrameBuf frame_)
         : demuxer(demuxer_), stream(stream_), decoder(decoder_), pkt(pkt_),
-          frame(frame_) {}
+          framebuf(frame_) {}
 
     [[nodiscard]] static std::variant<DecodeContext, DecoderCreationError>
     open(const char* url) {
         auto pkt = make_managed<AVPacket, av_packet_alloc, av_packet_free>();
-        auto frame = make_managed<AVFrame, av_frame_alloc, av_frame_free>();
+        auto frame1 = make_managed<AVFrame, av_frame_alloc, av_frame_free>();
+        auto frame2 = make_managed<AVFrame, av_frame_alloc, av_frame_free>();
 
         // this should work with the way smart pointers work right?
-        if ((pkt == nullptr) || (frame == nullptr)) {
+        if ((pkt == nullptr) || (frame1 == nullptr) || (frame2 == nullptr)) {
             return DecoderCreationError{
                 .type = DecoderCreationError::AllocationFailure};
         }
@@ -164,15 +172,31 @@ struct DecodeContext {
         // set automatic threading
         decoder->thread_count = 0;
 
+        FrameBuf framebuf{frame1.release(), frame2.release()};
+
         return std::variant<DecodeContext, DecoderCreationError>{
             std::in_place_type<DecodeContext>,
             demuxer.release(),
             stream,
             decoder.release(),
             pkt.release(),
-            frame.release()};
+            framebuf};
     }
 };
+
+uint32_t calc_frame_sum(const uint8_t* ptr, size_t xsize, size_t ysize,
+                        size_t stride) {
+    uint32_t sum = 0;
+    while (ysize-- != 0) {
+        for (size_t i = 0; i < xsize; i++) {
+            sum += ptr[i];
+        }
+
+        ptr += stride;
+    }
+
+    return sum;
+}
 
 // how do you make a static allocation?
 
@@ -182,27 +206,34 @@ int run_decoder(DecodeContext& dc) {
     // previously was allocated with non-NULL codec,
     // so we can pass NULL here.
     int ret = avcodec_open2(dc.decoder, nullptr, nullptr);
-    if (ret < 0) {
+    if (ret < 0) [[unlikely]] {
         return ret;
     }
+
+    // start off with first conceptual frame = 0 index
+    int accessor_offset = 0;
+
+    auto get_sum = [](AVFrame* f) {
+        return calc_frame_sum(f->data[0], f->width, f->height, f->linesize[0]);
+    };
 
     while (true) {
         // Get packet (compressed data) from demuxer
         ret = av_read_frame(dc.demuxer, dc.pkt);
         // EOF
-        if (ret < 0) {
+        if (ret < 0) [[unlikely]] {
             break;
         }
 
         // skip packets other than the ones we're interested in
-        if (dc.pkt->stream_index != dc.stream->index) {
+        if (dc.pkt->stream_index != dc.stream->index) [[unlikely]] {
             av_packet_unref(dc.pkt);
             continue;
         }
 
         // Send the compressed data to the decoder
         ret = avcodec_send_packet(dc.decoder, dc.pkt);
-        if (ret < 0) {
+        if (ret < 0) [[unlikely]] {
             // Error decoding frame
             av_packet_unref(dc.pkt);
             w_stdout("Error decoding frame!\n");
@@ -212,22 +243,41 @@ int run_decoder(DecodeContext& dc) {
         }
 
         // av_frame_unref() is called automatically by this function
-        ret = avcodec_receive_frame(dc.decoder, dc.frame);
+        ret =
+            avcodec_receive_frame(dc.decoder, dc.framebuf[1 ^ accessor_offset]);
 
-        if (ret == AVERROR(EAGAIN)) {
+        if (ret == AVERROR(EAGAIN)) [[unlikely]] {
             // need to send more data
             continue;
         }
 
-        if (ret < 0) {
+        if (ret < 0) [[unlikely]] {
             return ret;
         }
 
-        // can use frame now
-        printf("Got frame %lld: %dx%d, stride %d\n", dc.decoder->frame_num,
-               dc.frame->width, dc.frame->height, dc.frame->linesize[0]);
+        if (dc.decoder->frame_num > 1) [[likely]] {
+            // use adjacent pair of frames
 
-        av_frame_unref(dc.frame);
+            auto s1 = get_sum(dc.framebuf[0 ^ accessor_offset]);
+            auto s2 = get_sum(dc.framebuf[1 ^ accessor_offset]);
+
+            printf("Frame Pair: [%d, %d]\n", s1, s2);
+
+            av_frame_unref(dc.framebuf[0 ^ accessor_offset]);
+        } else {
+            // no unref needed, second frame is already unref
+            // and first frame is needed next iteration
+        }
+
+        // dc.framebuf[0]->display_picture_number
+
+        // use frame
+        // printf("Got frame %lld: %dx%d, stride %d\n", dc.decoder->frame_num,
+        //        dc.framebuf[0]->width, dc.framebuf[0]->height,
+        //        dc.framebuf[0]->linesize[0]);
+
+        // swap access order of frames
+        accessor_offset ^= 1;
     }
 
     // send flush packet
@@ -235,19 +285,38 @@ int run_decoder(DecodeContext& dc) {
 
     // receive last frames
     while (true) {
-        ret = avcodec_receive_frame(dc.decoder, dc.frame);
+        // ret = avcodec_receive_frame(dc.decoder, dc.framebuf[0]);
+
+        ret =
+            avcodec_receive_frame(dc.decoder, dc.framebuf[1 ^ accessor_offset]);
+
         // cannot be EAGAIN since we sent everything
-        if (ret == AVERROR_EOF) {
+        if (ret == AVERROR_EOF) [[unlikely]] {
             return 0;
-        } else if (ret < 0) {
+        } else if (ret < 0) [[unlikely]] {
             return ret;
         }
 
         // can use frame now
-        printf("Got frame %lld: %dx%d, stride %d\n", dc.decoder->frame_num,
-               dc.frame->width, dc.frame->height, dc.frame->linesize[0]);
+        // printf("Got frame %lld: %dx%d, stride %d\n", dc.decoder->frame_num,
+        //        dc.framebuf[0]->width, dc.framebuf[0]->height,
+        //        dc.framebuf[0]->linesize[0]);
 
-        av_frame_unref(dc.frame);
+        if (dc.decoder->frame_num > 1) [[likely]] {
+            // use adjacent pair of frames
+
+            auto s1 = get_sum(dc.framebuf[0 ^ accessor_offset]);
+            auto s2 = get_sum(dc.framebuf[1 ^ accessor_offset]);
+
+            printf("Frame Pair: [%d, %d]\n", s1, s2);
+
+            av_frame_unref(dc.framebuf[0 ^ accessor_offset]);
+        } else {
+            // no unref needed, second frame is already unref
+            // and first frame is needed next iteration
+        }
+
+        accessor_offset ^= 1;
     }
 
     return 0;
