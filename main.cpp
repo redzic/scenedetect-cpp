@@ -2,7 +2,6 @@
 #include <cassert>
 #include <cerrno>
 #include <chrono>
-#include <corecrt.h>
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
@@ -23,10 +22,14 @@ extern "C" {
 #include <libavutil/frame.h>
 }
 
-inline void w_stdout(std::string_view sv) {
+namespace {
+
+#define AlwaysInline __attribute__((always_inline)) inline
+
+AlwaysInline void w_stdout(std::string_view sv) {
     write(STDOUT_FILENO, sv.data(), sv.size());
 }
-inline void w_stderr(std::string_view sv) {
+AlwaysInline void w_stderr(std::string_view sv) {
     write(STDERR_FILENO, sv.data(), sv.size());
 }
 
@@ -333,6 +336,8 @@ auto since(std::chrono::time_point<clock_t, duration_t> const& start) {
 
 auto now() { return std::chrono::steady_clock::now(); }
 
+} // namespace
+
 int main(int argc, char** argv) {
     if (signal(SIGSEGV, segvHandler) == SIG_ERR) {
         w_stderr(
@@ -375,8 +380,8 @@ int main(int argc, char** argv) {
                 auto frames = d_ctx.decoder->frame_num;
 
                 if (ret == 0) {
-                    double fps = static_cast<double>(frames) /
-                                 (static_cast<double>(elapsed_ms) / 1000.0);
+                    double fps = 1000.0 * (static_cast<double>(frames) /
+                                           static_cast<double>(elapsed_ms));
 
                     printf(
                         "Successfully decoded %d frames in %lld ms (%f fps)\n",
