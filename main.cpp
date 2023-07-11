@@ -175,35 +175,6 @@ struct DecodeContext {
     }
 };
 
-int decode_read(DecodeContext* dc, int flush) {
-    const int ret_done = flush != 0 ? AVERROR_EOF : AVERROR(EAGAIN);
-    int ret = 0;
-
-    while (ret >= 0) {
-        ret = avcodec_receive_frame(dc->decoder, dc->frame);
-        if (ret < 0) {
-            if (ret == AVERROR_EOF) {
-                // int const err = dc->process_frame(dc, nullptr);
-                int err = 0;
-                if (err < 0) {
-                    return err;
-                }
-            }
-
-            // return done
-            return (ret == ret_done) ? 0 : ret;
-        }
-
-        // ret = dc->process_frame(dc, dc->frame);
-        av_frame_unref(dc->frame);
-        if (ret < 0) {
-            return ret;
-        }
-    }
-
-    return 0;
-}
-
 // assume DecodeContext is not in a moved-from state.
 int run_decoder(DecodeContext& dc) {
     // AVCodecContext allocated with alloc context
