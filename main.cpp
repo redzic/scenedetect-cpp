@@ -232,7 +232,7 @@ int run_decoder(DecodeContext& dc) {
 
     int last_frame = 0;
 
-    auto receive_frames = [&dc, accessor_offset, get_sad]() mutable {
+    auto receive_frames = [&dc, accessor_offset]() mutable {
         // receive last frames
         while (true) {
             // ret = avcodec_receive_frame(dc.decoder, dc.framebuf[0]);
