@@ -53,7 +53,6 @@ struct DecoderCreationError {
     }
 };
 
-// Owned object (but can be in a moved-from state)
 struct DecodeContext {
     // these fields can be null
     AVFormatContext* demuxer{nullptr};
@@ -66,45 +65,23 @@ struct DecodeContext {
     constexpr DecodeContext() = default;
 
     // move constructor
-    constexpr DecodeContext(DecodeContext&& source) noexcept
-        : demuxer(source.demuxer), stream(source.stream),
-          decoder(source.decoder), pkt(source.pkt), frame(source.frame) {
-        source.demuxer = nullptr;
-        source.stream = nullptr;
-        source.decoder = nullptr;
-        source.pkt = nullptr;
-        source.frame = nullptr;
-    };
+    DecodeContext(DecodeContext&& source) = delete;
+
+    // copy constructor
+    DecodeContext(DecodeContext&) = delete;
 
     // copy assignment operator
     DecodeContext& operator=(const DecodeContext&) = delete;
     // move assignment operator
     DecodeContext& operator=(const DecodeContext&&) = delete;
 
-    DecodeContext(DecodeContext&) = delete;
-
-    // For some seemingly inexplicable reason, having this destructor present
-    // seems to cause some extremely weird issues to happen where a nonzero
-    // exit code is returned from main. This doesn't happen when deleting the
-    // destructor.
-
-    // umm... why the crap is this being called multiple times bro?
-    // constexpr
     constexpr ~DecodeContext() {
-        // This object might be moved from another object, in which case
-        // these fields are null.
-        if (frame != nullptr) {
-            av_frame_free(&frame);
-        }
-        if (pkt != nullptr) {
-            av_packet_free(&pkt);
-        }
-        if (decoder != nullptr) {
-            avcodec_free_context(&decoder);
-        }
-        if (demuxer != nullptr) {
-            avformat_close_input(&demuxer);
-        }
+        // Since we deleted all the copy/move constructors,
+        // we can do this without handling a "moved from" case.
+        av_frame_free(&frame);
+        av_packet_free(&pkt);
+        avcodec_free_context(&decoder);
+        avformat_close_input(&demuxer);
     }
 
     DecodeContext(AVFormatContext* demuxer_, AVStream* stream_,
@@ -198,6 +175,111 @@ struct DecodeContext {
     }
 };
 
+int decode_read(DecodeContext* dc, int flush) {
+    const int ret_done = flush != 0 ? AVERROR_EOF : AVERROR(EAGAIN);
+    int ret = 0;
+
+    while (ret >= 0) {
+        ret = avcodec_receive_frame(dc->decoder, dc->frame);
+        if (ret < 0) {
+            if (ret == AVERROR_EOF) {
+                // int const err = dc->process_frame(dc, nullptr);
+                int err = 0;
+                if (err < 0) {
+                    return err;
+                }
+            }
+
+            // return done
+            return (ret == ret_done) ? 0 : ret;
+        }
+
+        // ret = dc->process_frame(dc, dc->frame);
+        av_frame_unref(dc->frame);
+        if (ret < 0) {
+            return ret;
+        }
+    }
+
+    return 0;
+}
+
+// assume DecodeContext is not in a moved-from state.
+int run_decoder(DecodeContext& dc) {
+    // AVCodecContext allocated with alloc context
+    // previously was allocated with non-NULL codec,
+    // so we can pass NULL here.
+    int ret = avcodec_open2(dc.decoder, nullptr, nullptr);
+    if (ret < 0) {
+        return ret;
+    }
+
+    while (true) {
+        // Get packet (compressed data) from demuxer
+        ret = av_read_frame(dc.demuxer, dc.pkt);
+        // EOF
+        if (ret < 0) {
+            break;
+        }
+
+        // If packet contains some other bullshit
+        // get that the fuck out of here
+        if (dc.pkt->stream_index != dc.stream->index) {
+            av_packet_unref(dc.pkt);
+            continue;
+        }
+
+        // Send the compressed data to the decoder
+        ret = avcodec_send_packet(dc.decoder, dc.pkt);
+        if (ret < 0) {
+            // Error decoding frame
+            std::cout << "Error decoding frame!\n";
+            return ret;
+        }
+        av_packet_unref(dc.pkt);
+
+        // av_frame_unref() is called automatically by this function
+        ret = avcodec_receive_frame(dc.decoder, dc.frame);
+
+        if (ret == AVERROR(EAGAIN)) {
+            // need to send more data
+            continue;
+        }
+
+        if (ret < 0) {
+            return ret;
+        }
+
+        // can use frame now
+        printf("Got frame %d: %dx%d, stride %d\n", dc.decoder->frame_num,
+               dc.frame->width, dc.frame->height, dc.frame->linesize[0]);
+
+        av_frame_unref(dc.frame);
+    }
+
+    // send flush packet
+    avcodec_send_packet(dc.decoder, nullptr);
+
+    // receive last frames
+    while (true) {
+        ret = avcodec_receive_frame(dc.decoder, dc.frame);
+        // cannot be EAGAIN since we sent everything
+        if (ret == AVERROR_EOF) {
+            return 0;
+        } else if (ret < 0) {
+            return ret;
+        }
+
+        // can use frame now
+        printf("Got frame %d: %dx%d, stride %d\n", dc.decoder->frame_num,
+               dc.frame->width, dc.frame->height, dc.frame->linesize[0]);
+
+        av_frame_unref(dc.frame);
+    }
+
+    return 0;
+}
+
 struct DecodeContextResult {
     // This will just have nullptr fields
     DecodeContext dc;
@@ -246,12 +328,18 @@ int main(int argc, char** argv) {
             using T = std::decay_t<decltype(arg)>;
 
             if constexpr (std::is_same_v<T, DecodeContext>) {
+                auto& decoder = arg;
+
                 std::cout << "DecodeContext held in std::variant<>\n";
+
+                int ret = run_decoder(decoder);
+                std::cout << "Return value: " << ret << '\n';
+
             } else if constexpr (std::is_same_v<T, DecoderCreationError>) {
                 auto error = arg;
 
                 if (error.type == DecoderCreationError::AVError) {
-                    std::array<char, 512> errbuf{};
+                    std::array<char, AV_ERROR_MAX_STRING_SIZE> errbuf{};
                     av_make_error_string(errbuf.data(), errbuf.size(),
                                          error.averror);
                     std::cerr
