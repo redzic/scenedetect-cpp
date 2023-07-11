@@ -6,7 +6,6 @@
 #include <cstdlib>
 #include <iostream>
 #include <memory>
-#include <optional>
 #include <unistd.h>
 #include <utility>
 #include <variant>
@@ -204,7 +203,7 @@ int run_decoder(DecodeContext& dc) {
         ret = avcodec_send_packet(dc.decoder, dc.pkt);
         if (ret < 0) {
             // Error decoding frame
-            std::cout << "Error decoding frame!\n";
+            printf("Error decoding frame!\n");
             return ret;
         }
         av_packet_unref(dc.pkt);
@@ -301,10 +300,10 @@ int main(int argc, char** argv) {
             if constexpr (std::is_same_v<T, DecodeContext>) {
                 auto& decoder = arg;
 
-                std::cout << "DecodeContext held in std::variant<>\n";
+                printf("DecodeContext held in std::variant<>\n");
 
                 int ret = run_decoder(decoder);
-                std::cout << "Return value: " << ret << '\n';
+                printf("Return value: %d\n", ret);
 
             } else if constexpr (std::is_same_v<T, DecoderCreationError>) {
                 auto error = arg;
@@ -313,16 +312,14 @@ int main(int argc, char** argv) {
                     std::array<char, AV_ERROR_MAX_STRING_SIZE> errbuf{};
                     av_make_error_string(errbuf.data(), errbuf.size(),
                                          error.averror);
-                    std::cerr
-                        << "Decoder failed to construct: " << errbuf.data()
-                        << '\n';
+
+                    fprintf(stderr, "Failed to initialize decoder: %s\n",
+                            errbuf.data());
+
                 } else {
-                    // this use of cerr causes a shit ton of extra code to be
-                    // generated.
-                    // so remove later if possible.
-                    std::cerr
-                        << "Decoder failed to construct: " << error.errmsg()
-                        << '\n';
+
+                    fprintf(stderr, "Failed to initialize decoder: %s\n",
+                            error.errmsg());
                 }
 
             } else {
