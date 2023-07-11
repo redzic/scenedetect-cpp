@@ -53,10 +53,8 @@ struct DecoderCreationError {
     }
 };
 
-// OWNED object
+// Owned object (but can be in a moved-from state)
 struct DecodeContext {
-    // all fields are owned and must be non-null
-
     // these fields can be null
     AVFormatContext* demuxer{nullptr};
     AVStream* stream{nullptr};
@@ -65,9 +63,10 @@ struct DecodeContext {
     AVPacket* pkt{nullptr};
     AVFrame* frame{nullptr};
 
-    DecodeContext() = default;
+    constexpr DecodeContext() = default;
 
-    DecodeContext(DecodeContext&& source) noexcept
+    // move constructor
+    constexpr DecodeContext(DecodeContext&& source) noexcept
         : demuxer(source.demuxer), stream(source.stream),
           decoder(source.decoder), pkt(source.pkt), frame(source.frame) {
         source.demuxer = nullptr;
@@ -189,15 +188,13 @@ struct DecodeContext {
         // set automatic threading
         decoder->thread_count = 0;
 
-        std::variant<DecodeContext, DecoderCreationError> ret{
+        return std::variant<DecodeContext, DecoderCreationError>{
             std::in_place_type<DecodeContext>,
             demuxer.release(),
             stream,
             decoder.release(),
             pkt.release(),
             frame.release()};
-
-        return ret;
     }
 };
 
