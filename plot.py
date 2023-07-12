@@ -1,7 +1,7 @@
 import pandas as pd
 import matplotlib.pyplot as plt
 
-file_name = "data.txt"
+file_name = "scores.txt"
 
 # read data from file
 data = pd.read_csv(file_name, header=None)

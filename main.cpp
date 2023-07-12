@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <unistd.h>
@@ -213,7 +214,7 @@ uint32_t calc_frame_sad(const uint8_t* __restrict ptr1,
 #define ERASE_LINE_ANSI "\x1B[1A\x1B[2K"
 
 // assume DecodeContext is not in a moved-from state.
-int run_decoder(DecodeContext& dc) {
+int run_decoder(DecodeContext& dc, std::vector<uint32_t>* scores) {
     // AVCodecContext allocated with alloc context
     // previously was allocated with non-NULL codec,
     // so we can pass NULL here.
@@ -226,17 +227,19 @@ int run_decoder(DecodeContext& dc) {
     int accessor_offset = 0;
 
     auto get_sad = [](AVFrame* f1, AVFrame* f2) {
+        assert(f1->width == f2->width);
+        assert(f1->height == f2->height);
+        assert(f1->linesize[0] == f2->linesize[0]);
+
         return calc_frame_sad(f1->data[0], f2->data[0], f1->width, f1->height,
                               f1->linesize[0]);
     };
 
     int last_frame = 0;
 
-    auto receive_frames = [&dc, accessor_offset]() mutable {
+    auto receive_frames = [&dc, accessor_offset, &get_sad, scores]() mutable {
         // receive last frames
         while (true) {
-            // ret = avcodec_receive_frame(dc.decoder, dc.framebuf[0]);
-
             int ret = avcodec_receive_frame(dc.decoder,
                                             dc.framebuf[1 ^ accessor_offset]);
 
@@ -247,9 +250,10 @@ int run_decoder(DecodeContext& dc) {
             if (dc.decoder->frame_num > 1) [[likely]] {
                 // use adjacent pair of frames
 
-                // auto s1 = get_sad(dc.framebuf[0 ^ accessor_offset],
-                //                   dc.framebuf[1 ^ accessor_offset]);
+                auto s1 = get_sad(dc.framebuf[0 ^ accessor_offset],
+                                  dc.framebuf[1 ^ accessor_offset]);
 
+                scores->push_back(s1);
                 // printf("Frame Pair SAD: %d\n", s1);
 
                 av_frame_unref(dc.framebuf[0 ^ accessor_offset]);
@@ -280,7 +284,7 @@ int run_decoder(DecodeContext& dc) {
 
         // Send the compressed data to the decoder
         ret = avcodec_send_packet(dc.decoder, dc.pkt);
-        if (ret < 0) {
+        if (ret < 0) [[unlikely]] {
             // Error decoding frame
             av_packet_unref(dc.pkt);
 
@@ -293,7 +297,7 @@ int run_decoder(DecodeContext& dc) {
 
         receive_frames();
 
-        if (dc.decoder->frame_num - last_frame > 40) {
+        if (dc.decoder->frame_num - last_frame > 256) [[unlikely]] {
             last_frame = (int)dc.decoder->frame_num;
 
             printf(ERASE_LINE_ANSI "Received %d frames so far\n", last_frame);
@@ -373,8 +377,11 @@ int main(int argc, char** argv) {
 
                 w_stdout("DecodeContext held in std::variant<>\n");
 
+                std::vector<uint32_t> scores;
+                scores.reserve(1024);
+
                 auto start = now();
-                int ret = run_decoder(d_ctx);
+                int ret = run_decoder(d_ctx, &scores);
                 auto elapsed_ms = since(start).count();
 
                 auto frames = d_ctx.decoder->frame_num;
@@ -386,6 +393,17 @@ int main(int argc, char** argv) {
                     printf(
                         "Successfully decoded %d frames in %lld ms (%f fps)\n",
                         (int)frames, elapsed_ms, fps);
+
+                    printf("Scores len: %llu\n", scores.size());
+                    printf("Writing data to scores.txt\n");
+
+                    std::ofstream o_file;
+                    o_file.open("scores.txt");
+                    for (auto score : scores) {
+                        o_file << score << '\n';
+                    }
+                    o_file.close();
+
                 } else {
                     printf("Decoding error! value: %d\n", ret);
                 }

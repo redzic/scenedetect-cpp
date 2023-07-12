@@ -1,18 +1,25 @@
-import numpy
+import matplotlib.pyplot as plt
 
 
-def compute_frame_average(frame: numpy.ndarray) -> float:
-    """Computes the average pixel value/intensity for all pixels in a frame.
+scores = []
+idx = 0
 
-    The value is computed by adding up the 8-bit R, G, and B values for
-    each pixel, and dividing by the number of pixels multiplied by 3.
+with open("scores.txt") as f:
+    s = f.read()
+    for line in s.split("\n"):
+        if line != "":
+            scores.append((idx, int(line)))
+            idx += 1
 
-    Arguments:
-        frame: Frame representing the RGB pixels to average.
+data = sorted(scores, key=lambda x: x[1])
+# print(scores)
 
-    Returns:
-        Average pixel intensity across all 3 channels of `frame`
-    """
-    num_pixel_values = float(frame.shape[0] * frame.shape[1] * frame.shape[2])
-    avg_pixel_value = numpy.sum(frame[:, :, :]) / num_pixel_values
-    return avg_pixel_value
+
+# plot data
+plt.figure(figsize=(10, 6))
+plt.plot(data)
+plt.title("Plot from Text File Data")
+plt.xlabel("Line Number")
+plt.ylabel("Value")
+plt.grid(True)
+plt.show()
