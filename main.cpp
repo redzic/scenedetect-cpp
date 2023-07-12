@@ -1,3 +1,5 @@
+#include "libavutil/pixfmt.h"
+#include "libavutil/rational.h"
 #include <array>
 #include <cassert>
 #include <cerrno>
@@ -21,6 +23,7 @@ extern "C" {
 #include <libavutil/dict.h>
 #include <libavutil/error.h>
 #include <libavutil/frame.h>
+#include <libavutil/opt.h>
 }
 
 namespace {
@@ -59,7 +62,8 @@ struct DecoderCreationError {
     }
 };
 
-using FrameBuf = std::array<AVFrame*, 2>;
+constexpr size_t framebuf_size = 512;
+using FrameBuf = std::array<AVFrame*, framebuf_size>;
 
 struct DecodeContext {
     // these fields can be null
@@ -69,6 +73,7 @@ struct DecodeContext {
 
     AVPacket* pkt{nullptr};
     FrameBuf framebuf{};
+    int framebuf_output_index = 0;
 
     constexpr DecodeContext() = default;
 
@@ -104,13 +109,24 @@ struct DecodeContext {
     [[nodiscard]] static std::variant<DecodeContext, DecoderCreationError>
     open(const char* url) {
         auto pkt = make_managed<AVPacket, av_packet_alloc, av_packet_free>();
-        auto frame1 = make_managed<AVFrame, av_frame_alloc, av_frame_free>();
-        auto frame2 = make_managed<AVFrame, av_frame_alloc, av_frame_free>();
 
         // this should work with the way smart pointers work right?
-        if ((pkt == nullptr) || (frame1 == nullptr) || (frame2 == nullptr)) {
+        if (pkt == nullptr) {
             return DecoderCreationError{
                 .type = DecoderCreationError::AllocationFailure};
+        }
+
+        // auto frame1 = make_managed<AVFrame, av_frame_alloc, av_frame_free>();
+
+        // TODO properly clean up resources on alloc failure
+        FrameBuf frame_buffer{};
+
+        for (auto& frame : frame_buffer) {
+            frame = av_frame_alloc();
+            if (frame == nullptr) {
+                return DecoderCreationError{
+                    .type = DecoderCreationError::AllocationFailure};
+            }
         }
 
         AVFormatContext* raw_demuxer = nullptr;
@@ -178,15 +194,13 @@ struct DecodeContext {
         // set automatic threading
         decoder->thread_count = 0;
 
-        FrameBuf framebuf{frame1.release(), frame2.release()};
-
         return std::variant<DecodeContext, DecoderCreationError>{
             std::in_place_type<DecodeContext>,
             demuxer.release(),
             stream,
             decoder.release(),
             pkt.release(),
-            framebuf};
+            frame_buffer};
     }
 };
 
@@ -211,10 +225,10 @@ uint32_t calc_frame_sad(const uint8_t* __restrict ptr1,
 // how do you make a static allocation?
 
 // Move cursor up and erase line
-#define ERASE_LINE_ANSI "\x1B[1A\x1B[2K"
+#define ERASE_LINE_ANSI "\x1B[1A\x1B[2K" // NOLINT
 
 // assume DecodeContext is not in a moved-from state.
-int run_decoder(DecodeContext& dc, std::vector<uint32_t>* scores) {
+int run_decoder(DecodeContext& dc) {
     // AVCodecContext allocated with alloc context
     // previously was allocated with non-NULL codec,
     // so we can pass NULL here.
@@ -223,50 +237,21 @@ int run_decoder(DecodeContext& dc, std::vector<uint32_t>* scores) {
         return ret;
     }
 
-    // start off with first conceptual frame = 0 index
-    int accessor_offset = 0;
+    // int last_frame = 0;
 
-    auto get_sad = [](AVFrame* f1, AVFrame* f2) {
-        assert(f1->width == f2->width);
-        assert(f1->height == f2->height);
-        assert(f1->linesize[0] == f2->linesize[0]);
-
-        return calc_frame_sad(f1->data[0], f2->data[0], f1->width, f1->height,
-                              f1->linesize[0]);
-    };
-
-    int last_frame = 0;
-
-    auto receive_frames = [&dc, accessor_offset, &get_sad, scores]() mutable {
+    auto receive_frames = [&dc]() {
         // receive last frames
-        while (true) {
-            int ret = avcodec_receive_frame(dc.decoder,
-                                            dc.framebuf[1 ^ accessor_offset]);
-
+        while (dc.framebuf_output_index < (int)framebuf_size) {
+            int ret = avcodec_receive_frame(
+                dc.decoder, dc.framebuf[dc.framebuf_output_index]);
             if (ret < 0) [[unlikely]] {
                 return ret;
             }
 
-            if (dc.decoder->frame_num > 1) [[likely]] {
-                // use adjacent pair of frames
-
-                auto s1 = get_sad(dc.framebuf[0 ^ accessor_offset],
-                                  dc.framebuf[1 ^ accessor_offset]);
-
-                scores->push_back(s1);
-                // printf("Frame Pair SAD: %d\n", s1);
-
-                av_frame_unref(dc.framebuf[0 ^ accessor_offset]);
-            } else {
-                // no unref needed, second frame is already unref
-                // and first frame is needed next iteration
-            }
-
-            accessor_offset ^= 1;
+            dc.framebuf_output_index += 1;
         }
+        return 0;
     };
-
-    printf("Received 0 frames so far\n");
 
     while (true) {
         // Get packet (compressed data) from demuxer
@@ -288,28 +273,26 @@ int run_decoder(DecodeContext& dc, std::vector<uint32_t>* scores) {
             // Error decoding frame
             av_packet_unref(dc.pkt);
 
-            w_stdout("Error decoding frame!\nError was not EAGAIN\n");
+            w_stdout("Error decoding frame!\n");
 
             return ret;
         } else {
             av_packet_unref(dc.pkt);
         }
 
+        // receive as many frames as possible up until max size
         receive_frames();
-
-        if (dc.decoder->frame_num - last_frame > 256) [[unlikely]] {
-            last_frame = (int)dc.decoder->frame_num;
-
-            printf(ERASE_LINE_ANSI "Received %d frames so far\n", last_frame);
+        if (dc.framebuf_output_index >= (int)framebuf_size) {
+            return 0;
         }
     }
 
-    // send flush packet
+    // once control flow reached here, it is guaranteed that more frames need to
+    // be received to fill the buffer send flush packet
     avcodec_send_packet(dc.decoder, nullptr);
     receive_frames();
 
-    printf(ERASE_LINE_ANSI "Received %d frames so far\n",
-           (int)dc.decoder->frame_num);
+    printf("Received %d frames so far\n", (int)dc.decoder->frame_num);
 
     return 0;
 }
@@ -339,6 +322,52 @@ auto since(std::chrono::time_point<clock_t, duration_t> const& start) {
 }
 
 auto now() { return std::chrono::steady_clock::now(); }
+
+int encode_frames(FrameBuf& frame_buffer) {
+    auto codec = avcodec_find_encoder_by_name("libx264");
+    // so avcodeccontext is used for both encoding and decoding...
+    auto avcc = avcodec_alloc_context3(codec);
+
+    // assert(avcc);
+    if (avcc == nullptr) {
+        w_stderr("failed to allocate encoder context\n");
+        return -1;
+    }
+
+    auto pkt = av_packet_alloc();
+
+    // idk what this does tbh
+    // does this actually affect the encoder?
+    // or is it just some metadata or something?
+    avcc->bit_rate = 400000;
+
+    avcc->width = frame_buffer[0]->width;
+    avcc->height = frame_buffer[0]->height;
+    avcc->time_base = (AVRational){1, 25};
+    avcc->framerate = (AVRational){25, 1};
+
+    avcc->gop_size = 10;
+    avcc->max_b_frames = 1;
+    avcc->pix_fmt = AV_PIX_FMT_YUV420P;
+
+    av_opt_set(avcc->priv_data, "preset", "slow", 0);
+
+    int ret = avcodec_open2(avcc, codec, nullptr);
+    if (ret < 0) {
+        w_stderr("failed to open codec\n");
+        return ret;
+    }
+
+    std::ofstream file;
+    file.open("output_file.mp4");
+
+    for (auto& frame : frame_buffer) {
+    }
+
+    file.close();
+
+    return 0;
+}
 
 } // namespace
 
@@ -377,11 +406,11 @@ int main(int argc, char** argv) {
 
                 w_stdout("DecodeContext held in std::variant<>\n");
 
-                std::vector<uint32_t> scores;
-                scores.reserve(1024);
+                // std::vector<uint32_t> scores;
+                // scores.reserve(1024);
 
                 auto start = now();
-                int ret = run_decoder(d_ctx, &scores);
+                int ret = run_decoder(d_ctx);
                 auto elapsed_ms = since(start).count();
 
                 auto frames = d_ctx.decoder->frame_num;
@@ -394,15 +423,7 @@ int main(int argc, char** argv) {
                         "Successfully decoded %d frames in %lld ms (%f fps)\n",
                         (int)frames, elapsed_ms, fps);
 
-                    printf("Scores len: %llu\n", scores.size());
-                    printf("Writing data to scores.txt\n");
-
-                    std::ofstream o_file;
-                    o_file.open("scores.txt");
-                    for (auto score : scores) {
-                        o_file << score << '\n';
-                    }
-                    o_file.close();
+                    // encode frames now
 
                 } else {
                     printf("Decoding error! value: %d\n", ret);
