@@ -323,6 +323,34 @@ auto since(std::chrono::time_point<clock_t, duration_t> const& start) {
 
 auto now() { return std::chrono::steady_clock::now(); }
 
+int encode(AVCodecContext* enc_ctx, AVFrame* frame, AVPacket* pkt,
+           std::ofstream& ostream) {
+    // frame might be null
+    int ret = avcodec_send_frame(enc_ctx, frame);
+    if (ret < 0) {
+        printf("error sending frame to encoder\n");
+        return ret;
+    }
+
+    while (true) {
+        int ret = avcodec_receive_packet(enc_ctx, pkt);
+        // why check for eof though?
+        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+            return 0;
+        } else if (ret < 0) {
+            printf("unspecified error during encoding\n");
+            return ret;
+        }
+
+        // can write the compressed packet to the bitstream now
+
+        ostream.write((char*)pkt->data, pkt->size);
+        av_packet_unref(pkt);
+    }
+
+    return 0;
+}
+
 int encode_frames(FrameBuf& frame_buffer) {
     auto codec = avcodec_find_encoder_by_name("libx264");
     // so avcodeccontext is used for both encoding and decoding...
@@ -346,8 +374,8 @@ int encode_frames(FrameBuf& frame_buffer) {
     avcc->time_base = (AVRational){1, 25};
     avcc->framerate = (AVRational){25, 1};
 
-    avcc->gop_size = 10;
-    avcc->max_b_frames = 1;
+    // avcc->gop_size = 10;
+    // avcc->max_b_frames = 1;
     avcc->pix_fmt = AV_PIX_FMT_YUV420P;
 
     av_opt_set(avcc->priv_data, "preset", "slow", 0);
@@ -358,10 +386,11 @@ int encode_frames(FrameBuf& frame_buffer) {
         return ret;
     }
 
-    std::ofstream file;
-    file.open("output_file.mp4");
+    std::ofstream file("output_file.mp4", std::ofstream::binary);
+    // file.open("output_file.mp4");
 
     for (auto& frame : frame_buffer) {
+        encode(avcc, frame, pkt, file);
     }
 
     file.close();
@@ -424,6 +453,7 @@ int main(int argc, char** argv) {
                         (int)frames, elapsed_ms, fps);
 
                     // encode frames now
+                    encode_frames(d_ctx.framebuf);
 
                 } else {
                     printf("Decoding error! value: %d\n", ret);
