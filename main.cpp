@@ -13,6 +13,7 @@
 #include <unistd.h>
 #include <utility>
 #include <variant>
+#include <vector>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
