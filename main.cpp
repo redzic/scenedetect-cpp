@@ -1,5 +1,3 @@
-#include "libavutil/pixfmt.h"
-#include "libavutil/rational.h"
 #include <array>
 #include <cassert>
 #include <cerrno>
@@ -11,6 +9,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <thread>
 #include <unistd.h>
 #include <utility>
 #include <variant>
@@ -20,10 +19,13 @@ extern "C" {
 #include <libavcodec/codec.h>
 #include <libavcodec/packet.h>
 #include <libavformat/avformat.h>
+#include <libavutil/avutil.h>
 #include <libavutil/dict.h>
 #include <libavutil/error.h>
 #include <libavutil/frame.h>
 #include <libavutil/opt.h>
+#include <libavutil/pixfmt.h>
+#include <libavutil/rational.h>
 }
 
 namespace {
@@ -75,7 +77,7 @@ struct DecodeContext {
     FrameBuf framebuf{};
     int framebuf_output_index = 0;
 
-    constexpr DecodeContext() = default;
+    DecodeContext() = delete;
 
     // move constructor
     DecodeContext(DecodeContext&& source) = delete;
@@ -88,9 +90,11 @@ struct DecodeContext {
     // move assignment operator
     DecodeContext& operator=(const DecodeContext&&) = delete;
 
-    constexpr ~DecodeContext() {
+    ~DecodeContext() {
         // Since we deleted all the copy/move constructors,
         // we can do this without handling a "moved from" case.
+
+        printf("~DecodeContext()\n");
 
         for (auto* f : framebuf) {
             av_frame_free(&f);
@@ -205,22 +209,22 @@ struct DecodeContext {
 };
 
 // Assumes same dimensions between frames
-uint32_t calc_frame_sad(const uint8_t* __restrict ptr1,
-                        const uint8_t* __restrict ptr2, size_t xsize,
-                        size_t ysize, size_t stride) {
-    uint32_t sum = 0;
-    while (ysize-- != 0) {
-        for (size_t i = 0; i < xsize; i++) {
-            sum += std::abs(static_cast<int32_t>(ptr1[i]) -
-                            static_cast<int32_t>(ptr2[i]));
-        }
+// uint32_t calc_frame_sad(const uint8_t* __restrict ptr1,
+//                         const uint8_t* __restrict ptr2, size_t xsize,
+//                         size_t ysize, size_t stride) {
+//     uint32_t sum = 0;
+//     while (ysize-- != 0) {
+//         for (size_t i = 0; i < xsize; i++) {
+//             sum += std::abs(static_cast<int32_t>(ptr1[i]) -
+//                             static_cast<int32_t>(ptr2[i]));
+//         }
 
-        ptr1 += stride;
-        ptr2 += stride;
-    }
+//         ptr1 += stride;
+//         ptr2 += stride;
+//     }
 
-    return sum;
-}
+//     return sum;
+// }
 
 // how do you make a static allocation?
 
@@ -324,8 +328,8 @@ auto since(std::chrono::time_point<clock_t, duration_t> const& start) {
 auto now() { return std::chrono::steady_clock::now(); }
 
 int encode(AVCodecContext* enc_ctx, AVFrame* frame, AVPacket* pkt,
-           std::ofstream& ostream) {
-    // frame might be null
+           FILE* ostream) {
+    // frame can be null, which is considered a flush frame
     int ret = avcodec_send_frame(enc_ctx, frame);
     if (ret < 0) {
         printf("error sending frame to encoder\n");
@@ -344,17 +348,19 @@ int encode(AVCodecContext* enc_ctx, AVFrame* frame, AVPacket* pkt,
 
         // can write the compressed packet to the bitstream now
 
-        ostream.write((char*)pkt->data, pkt->size);
+        // ostream.write(reinterpret_cast<char*>(pkt->data), pkt->size);
+        (void)fwrite(pkt->data, pkt->size, 1, ostream);
         av_packet_unref(pkt);
     }
 
     return 0;
 }
 
-int encode_frames(FrameBuf& frame_buffer) {
-    auto codec = avcodec_find_encoder_by_name("libx264");
+int encode_frames(const char* file_name, AVFrame** frame_buffer,
+                  size_t frame_count) {
+    const auto* codec = avcodec_find_encoder_by_name("libx264");
     // so avcodeccontext is used for both encoding and decoding...
-    auto avcc = avcodec_alloc_context3(codec);
+    auto* avcc = avcodec_alloc_context3(codec);
 
     // assert(avcc);
     if (avcc == nullptr) {
@@ -362,11 +368,10 @@ int encode_frames(FrameBuf& frame_buffer) {
         return -1;
     }
 
-    auto pkt = av_packet_alloc();
+    auto* pkt = av_packet_alloc();
 
-    // idk what this does tbh
-    // does this actually affect the encoder?
-    // or is it just some metadata or something?
+    // Yeah this actually affects how much bitrate the
+    // encode uses, it's not just metadata
     avcc->bit_rate = 400000;
 
     avcc->width = frame_buffer[0]->width;
@@ -374,7 +379,7 @@ int encode_frames(FrameBuf& frame_buffer) {
     avcc->time_base = (AVRational){1, 25};
     avcc->framerate = (AVRational){25, 1};
 
-    // avcc->gop_size = 10;
+    // avcc->gop_size = 60;
     // avcc->max_b_frames = 1;
     avcc->pix_fmt = AV_PIX_FMT_YUV420P;
 
@@ -386,19 +391,38 @@ int encode_frames(FrameBuf& frame_buffer) {
         return ret;
     }
 
-    std::ofstream file("output_file.mp4", std::ofstream::binary);
-    // file.open("output_file.mp4");
+    // C-style IO is needed for binary size to not explode on Windows with
+    // static linking
 
-    for (auto& frame : frame_buffer) {
-        encode(avcc, frame, pkt, file);
+    // TODO use unique_ptr as wrapper resource manager
+    FILE* file = fopen(file_name, "wb");
+
+    for (size_t i = 0; i < frame_count; i++) {
+        // required
+        frame_buffer[i]->pict_type = AV_PICTURE_TYPE_NONE;
+        encode(avcc, frame_buffer[i], pkt, file);
     }
+    // need to send flush packet
+    encode(avcc, nullptr, pkt, file);
 
-    file.close();
+    (void)fclose(file);
+    avcodec_free_context(&avcc);
 
     return 0;
 }
 
 } // namespace
+
+constexpr size_t CHUNK_FRAME_SIZE = 60;
+
+void encode_chunk(int chunk_idx, AVFrame** framebuf, size_t n_frames) {
+    std::array<char, 64> buf{};
+
+    // this should write null terminator
+    (void)snprintf(buf.data(), buf.size(), "file %d.mp4", chunk_idx);
+
+    encode_frames(buf.data(), framebuf, n_frames);
+}
 
 int main(int argc, char** argv) {
     if (signal(SIGSEGV, segvHandler) == SIG_ERR) {
@@ -433,18 +457,13 @@ int main(int argc, char** argv) {
             if constexpr (std::is_same_v<T, DecodeContext>) {
                 auto& d_ctx = arg;
 
-                w_stdout("DecodeContext held in std::variant<>\n");
-
-                // std::vector<uint32_t> scores;
-                // scores.reserve(1024);
-
                 auto start = now();
                 int ret = run_decoder(d_ctx);
                 auto elapsed_ms = since(start).count();
 
-                auto frames = d_ctx.decoder->frame_num;
-
                 if (ret == 0) {
+                    auto frames = static_cast<size_t>(d_ctx.decoder->frame_num);
+
                     double fps = 1000.0 * (static_cast<double>(frames) /
                                            static_cast<double>(elapsed_ms));
 
@@ -453,7 +472,44 @@ int main(int argc, char** argv) {
                         (int)frames, elapsed_ms, fps);
 
                     // encode frames now
-                    encode_frames(d_ctx.framebuf);
+
+                    // uh... we really need a safe way to do this and stuff
+                    // this is really bad... just assuming enough frames are
+                    // available
+
+                    auto start = now();
+
+                    std::vector<std::thread> thread_vector{};
+                    thread_vector.reserve((frames / CHUNK_FRAME_SIZE) + 1);
+
+                    {
+                        size_t i = 0;
+                        // encode in chunks
+                        for (; i < frames / CHUNK_FRAME_SIZE; i++) {
+
+                            thread_vector.emplace_back(
+                                &encode_chunk, i,
+                                d_ctx.framebuf.data() + (i * CHUNK_FRAME_SIZE),
+                                CHUNK_FRAME_SIZE);
+                            // thread_vector[thread_vector.size() - 1].join();
+                        }
+                        // do remainder
+                        if (frames % CHUNK_FRAME_SIZE != 0) {
+
+                            thread_vector.emplace_back(
+                                &encode_chunk, i,
+                                d_ctx.framebuf.data() + (i * CHUNK_FRAME_SIZE),
+                                frames % CHUNK_FRAME_SIZE);
+                            // thread_vector[thread_vector.size() - 1].join();
+                        }
+                    }
+
+                    for (auto& t : thread_vector) {
+                        t.join();
+                    }
+
+                    auto elapsed_ms = since(start).count();
+                    printf("Encoding took %lld ms\n", elapsed_ms);
 
                 } else {
                     printf("Decoding error! value: %d\n", ret);
