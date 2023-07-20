@@ -9,6 +9,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <unistd.h>
 #include <utility>
@@ -33,9 +34,6 @@ namespace {
 
 #define AlwaysInline __attribute__((always_inline)) inline
 
-AlwaysInline void w_stdout(std::string_view sv) {
-    write(STDOUT_FILENO, sv.data(), sv.size());
-}
 AlwaysInline void w_stderr(std::string_view sv) {
     write(STDERR_FILENO, sv.data(), sv.size());
 }
@@ -65,7 +63,10 @@ struct DecoderCreationError {
     }
 };
 
-constexpr size_t framebuf_size = 512;
+constexpr size_t CHUNK_FRAME_SIZE = 60;
+constexpr size_t NUM_WORKERS = 8;
+
+constexpr size_t framebuf_size = CHUNK_FRAME_SIZE * NUM_WORKERS;
 using FrameBuf = std::array<AVFrame*, framebuf_size>;
 
 struct DecodeContext {
@@ -76,7 +77,6 @@ struct DecodeContext {
 
     AVPacket* pkt{nullptr};
     FrameBuf framebuf{};
-    int framebuf_output_index = 0;
 
     DecodeContext() = delete;
 
@@ -232,8 +232,12 @@ struct DecodeContext {
 // Move cursor up and erase line
 #define ERASE_LINE_ANSI "\x1B[1A\x1B[2K" // NOLINT
 
-// assume DecodeContext is not in a moved-from state.
-int run_decoder(DecodeContext& dc) {
+// bounds checking is not performed here
+int run_decoder(DecodeContext& dc, size_t framebuf_offset, size_t max_frames) {
+    if ((framebuf_offset + max_frames - 1) > framebuf_size) {
+        return -1;
+    }
+
     // AVCodecContext allocated with alloc context
     // previously was allocated with non-NULL codec,
     // so we can pass NULL here.
@@ -242,25 +246,31 @@ int run_decoder(DecodeContext& dc) {
         return ret;
     }
 
-    // int last_frame = 0;
+    size_t output_index = 0;
 
-    auto receive_frames = [&dc]() {
+    auto receive_frames = [&dc, output_index, framebuf_offset,
+                           max_frames]() mutable {
         // receive last frames
-        while (dc.framebuf_output_index < (int)framebuf_size) {
+        while (output_index < max_frames) {
             int ret = avcodec_receive_frame(
-                dc.decoder, dc.framebuf[dc.framebuf_output_index]);
+                dc.decoder, dc.framebuf[output_index + framebuf_offset]);
             if (ret < 0) [[unlikely]] {
                 return ret;
             }
 
-            dc.framebuf_output_index += 1;
+            output_index += 1;
         }
         return 0;
     };
 
     while (true) {
+        ret = receive_frames();
+        if (ret != AVERROR(EAGAIN)) {
+            return ret;
+        }
+
         // Get packet (compressed data) from demuxer
-        int ret = av_read_frame(dc.demuxer, dc.pkt);
+        ret = av_read_frame(dc.demuxer, dc.pkt);
         // EOF in compressed data
         if (ret < 0) [[unlikely]] {
             break;
@@ -278,7 +288,7 @@ int run_decoder(DecodeContext& dc) {
             // Error decoding frame
             av_packet_unref(dc.pkt);
 
-            w_stdout("Error decoding frame!\n");
+            printf("Error decoding frame!\n");
 
             return ret;
         } else {
@@ -286,20 +296,27 @@ int run_decoder(DecodeContext& dc) {
         }
 
         // receive as many frames as possible up until max size
-        receive_frames();
-        if (dc.framebuf_output_index >= (int)framebuf_size) {
-            return 0;
+        ret = receive_frames();
+        // exit if output index
+        // if (ret != ) {
+        //     return ret;
+        // }
+        if (output_index >= max_frames) {
+            return (int)output_index;
         }
     }
 
     // once control flow reached here, it is guaranteed that more frames need to
     // be received to fill the buffer send flush packet
     avcodec_send_packet(dc.decoder, nullptr);
-    receive_frames();
+    ret = receive_frames();
+    if (ret < 0) {
+        return ret;
+    }
 
     printf("Received %d frames so far\n", (int)dc.decoder->frame_num);
 
-    return 0;
+    return (int)output_index;
 }
 
 struct DecodeContextResult {
@@ -362,6 +379,7 @@ int encode_frames(const char* file_name, AVFrame** frame_buffer,
     const auto* codec = avcodec_find_encoder_by_name("libx264");
     // so avcodeccontext is used for both encoding and decoding...
     auto* avcc = avcodec_alloc_context3(codec);
+    avcc->thread_count = 2;
 
     // assert(avcc);
     if (avcc == nullptr) {
@@ -412,18 +430,55 @@ int encode_frames(const char* file_name, AVFrame** frame_buffer,
     return 0;
 }
 
-} // namespace
-
-constexpr size_t CHUNK_FRAME_SIZE = 60;
-
-void encode_chunk(int chunk_idx, AVFrame** framebuf, size_t n_frames) {
+int encode_chunk(unsigned int chunk_idx, AVFrame** framebuf, size_t n_frames) {
     std::array<char, 64> buf{};
 
     // this should write null terminator
     (void)snprintf(buf.data(), buf.size(), "file %d.mp4", chunk_idx);
 
-    encode_frames(buf.data(), framebuf, n_frames);
+    return encode_frames(buf.data(), framebuf, n_frames);
 }
+
+std::mutex decoder_mutex;  // NOLINT
+unsigned int chunk_id = 0; // NOLINT
+
+// framebuf is start of 60-frame buffer that worker can use
+int worker_thread(unsigned int worker_id, DecodeContext& decoder) {
+    while (true) {
+        // should only access decoder once lock has been acquired
+        decoder_mutex.lock();
+
+        // decode 60 frames into frame buffer
+        int ret = run_decoder(decoder, worker_id * CHUNK_FRAME_SIZE,
+                              CHUNK_FRAME_SIZE);
+
+        if (ret < 0) {
+            decoder_mutex.unlock();
+            return ret;
+        }
+
+        // these accesses are behind mutex so we're all good
+        auto chunk_idx = chunk_id;
+        // increment for other chunks
+        chunk_id += 1;
+
+        // can assume frames are available, so unlock the mutex so
+        // other threads can use the decoder
+        decoder_mutex.unlock();
+
+        // a little sketchy but in theory this should be fine
+        // since framebuf is never modified
+        ret = encode_chunk(
+            chunk_idx, decoder.framebuf.data() + (worker_id * CHUNK_FRAME_SIZE),
+            CHUNK_FRAME_SIZE);
+
+        if (ret != 0) {
+            return ret;
+        }
+    }
+}
+
+} // namespace
 
 int main(int argc, char** argv) {
     if (signal(SIGSEGV, segvHandler) == SIG_ERR) {
@@ -459,7 +514,8 @@ int main(int argc, char** argv) {
                 auto& d_ctx = arg;
 
                 auto start = now();
-                int ret = run_decoder(d_ctx);
+                int ret = 0;
+                // int ret = run_decoder(d_ctx, 0, 480);
                 auto elapsed_ms = since(start).count();
 
                 if (ret == 0) {
@@ -481,28 +537,12 @@ int main(int argc, char** argv) {
                     auto start = now();
 
                     std::vector<std::thread> thread_vector{};
-                    thread_vector.reserve((frames / CHUNK_FRAME_SIZE) + 1);
+                    thread_vector.reserve(NUM_WORKERS);
 
-                    {
-                        size_t i = 0;
-                        // encode in chunks
-                        for (; i < frames / CHUNK_FRAME_SIZE; i++) {
-
-                            thread_vector.emplace_back(
-                                &encode_chunk, i,
-                                d_ctx.framebuf.data() + (i * CHUNK_FRAME_SIZE),
-                                CHUNK_FRAME_SIZE);
-                            // thread_vector[thread_vector.size() - 1].join();
-                        }
-                        // do remainder
-                        if (frames % CHUNK_FRAME_SIZE != 0) {
-
-                            thread_vector.emplace_back(
-                                &encode_chunk, i,
-                                d_ctx.framebuf.data() + (i * CHUNK_FRAME_SIZE),
-                                frames % CHUNK_FRAME_SIZE);
-                            // thread_vector[thread_vector.size() - 1].join();
-                        }
+                    // spawn worker threads
+                    for (unsigned int i = 0; i < NUM_WORKERS; i++) {
+                        thread_vector.emplace_back(&worker_thread, i,
+                                                   std::ref(d_ctx));
                     }
 
                     for (auto& t : thread_vector) {
