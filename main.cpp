@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <io.h>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -500,6 +501,20 @@ int worker_thread(unsigned int worker_id, DecodeContext& decoder) {
 
 } // namespace
 
+// assume same naming convention
+void concat_files(unsigned int num_files) {
+    std::array<char, 64> buf{};
+
+    std::ofstream dst("output.mp4", std::ios::binary);
+
+    // TODO convert to faster loop using read/write directly
+    for (unsigned int i = 0; i < num_files; i++) {
+        (void)snprintf(buf.data(), buf.size(), "file %d.mp4", i);
+        std::ifstream src(buf.data(), std::ios::binary);
+        dst << src.rdbuf();
+    }
+}
+
 int main(int argc, char** argv) {
     if (signal(SIGSEGV, segvHandler) == SIG_ERR) {
         w_stderr(
@@ -553,6 +568,10 @@ int main(int argc, char** argv) {
                 for (auto& t : thread_vector) {
                     t.join();
                 }
+
+                // there is no active lock on the mutex, so this can be safely
+                // accessed
+                concat_files(chunk_id);
 
                 auto elapsed_ms = since(start).count();
                 printf("Encoding took %lld ms\n", elapsed_ms);
