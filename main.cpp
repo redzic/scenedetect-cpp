@@ -27,6 +27,7 @@ extern "C" {
 #include <libavutil/dict.h>
 #include <libavutil/error.h>
 #include <libavutil/frame.h>
+#include <libavutil/log.h>
 #include <libavutil/opt.h>
 #include <libavutil/pixfmt.h>
 #include <libavutil/rational.h>
@@ -250,7 +251,7 @@ int run_decoder(DecodeContext& dc, size_t framebuf_offset, size_t max_frames) {
 
     size_t output_index = 0;
 
-    // returns number of frames successfully decoded OR negative error
+    // returns 0 on success, or negative averror
     auto receive_frames = [&dc, max_frames, framebuf_offset,
                            &output_index]() mutable {
         // receive last frames
@@ -273,14 +274,13 @@ int run_decoder(DecodeContext& dc, size_t framebuf_offset, size_t max_frames) {
         // stop because of max_frames, and need to keep reading frames from the
         // decoder on the next chunk.
 
+        // TODO deduplicate this code
         ret = receive_frames();
         if (ret == AVERROR_EOF) [[unlikely]] {
             return (int)output_index;
         } else if (ret < 0 && ret != AVERROR(EAGAIN)) [[unlikely]] {
             return ret;
         } else [[likely]] {
-            // we got AVERROR(EAGAIN), so just try sending a new
-            // packet and decoding frames from there
         }
 
         // Get packet (compressed data) from demuxer
@@ -317,8 +317,6 @@ int run_decoder(DecodeContext& dc, size_t framebuf_offset, size_t max_frames) {
         } else if (ret < 0 && ret != AVERROR(EAGAIN)) [[unlikely]] {
             return ret;
         } else [[likely]] {
-            // we got AVERROR(EAGAIN), so just try sending a new
-            // packet and decoding frames from there
         }
 
         if (output_index >= max_frames) {
@@ -332,7 +330,7 @@ int run_decoder(DecodeContext& dc, size_t framebuf_offset, size_t max_frames) {
     avcodec_send_packet(dc.decoder, nullptr);
 
     ret = receive_frames();
-    if (ret == AVERROR_EOF) {
+    if (ret == AVERROR_EOF || ret == 0) {
         return (int)output_index;
     } else {
         return ret;
@@ -388,6 +386,10 @@ int encode(AVCodecContext* enc_ctx, AVFrame* frame, AVPacket* pkt,
 
         // ostream.write(reinterpret_cast<char*>(pkt->data), pkt->size);
         (void)fwrite(pkt->data, pkt->size, 1, ostream);
+
+        // just printing this takes 100ms...
+        printf("received packet from encoder of %d bytes\n", pkt->size);
+
         av_packet_unref(pkt);
     }
 
@@ -460,32 +462,32 @@ int encode_chunk(unsigned int chunk_idx, AVFrame** framebuf, size_t n_frames) {
     return encode_frames(buf.data(), framebuf, n_frames);
 }
 
-std::mutex decoder_mutex;  // NOLINT
-unsigned int chunk_id = 0; // NOLINT
+std::mutex global_decoder_mutex;  // NOLINT
+unsigned int global_chunk_id = 0; // NOLINT
 
 // framebuf is start of frame buffer that worker can use
 int worker_thread(unsigned int worker_id, DecodeContext& decoder) {
     while (true) {
         // should only access decoder once lock has been acquired
-        decoder_mutex.lock();
+        global_decoder_mutex.lock();
 
         // decode CHUNK_FRAME_SIZE frames into frame buffer
         int frames = run_decoder(decoder, worker_id * CHUNK_FRAME_SIZE,
                                  CHUNK_FRAME_SIZE);
 
         if (frames <= 0) {
-            decoder_mutex.unlock();
+            global_decoder_mutex.unlock();
             return frames;
         }
 
         // these accesses are behind mutex so we're all good
-        auto chunk_idx = chunk_id;
+        auto chunk_idx = global_chunk_id;
         // increment for other chunks
-        chunk_id += 1;
+        global_chunk_id += 1;
 
         // can assume frames are available, so unlock the mutex so
         // other threads can use the decoder
-        decoder_mutex.unlock();
+        global_decoder_mutex.unlock();
 
         // a little sketchy but in theory this should be fine
         // since framebuf is never modified
@@ -518,6 +520,11 @@ void concat_files(unsigned int num_files) {
     dst.close();
 }
 
+static void avlog_do_nothing(void*, int level, const char* szFmt,
+                             va_list varg) {
+    // do nothing...
+}
+
 int main(int argc, char** argv) {
     if (signal(SIGSEGV, segvHandler) == SIG_ERR) {
         w_stderr(
@@ -543,6 +550,8 @@ int main(int argc, char** argv) {
 
     // so we should probably find a way to not use things that increase the
     // binary size a lot...
+
+    av_log_set_callback(avlog_do_nothing);
 
     std::visit(
         [](auto&& arg) {
@@ -574,9 +583,9 @@ int main(int argc, char** argv) {
 
                 auto elapsed_ms = since(start).count();
 
-                // there is no active lock on the mutex, so this can be safely
-                // accessed
-                concat_files(chunk_id);
+                // there is no active lock on the mutex, so this can be
+                // safely accessed
+                concat_files(global_chunk_id);
 
                 printf("Encoding took %lld ms\n", elapsed_ms);
 
