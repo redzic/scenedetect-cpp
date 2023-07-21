@@ -2,6 +2,7 @@
 #include <cassert>
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <csignal>
 #include <cstddef>
 #include <cstdint>
@@ -97,8 +98,6 @@ struct DecodeContext {
     ~DecodeContext() {
         // Since we deleted all the copy/move constructors,
         // we can do this without handling a "moved from" case.
-
-        printf("~DecodeContext()\n");
 
         for (auto* f : framebuf) {
             av_frame_free(&f);
@@ -212,24 +211,6 @@ struct DecodeContext {
     }
 };
 
-// Assumes same dimensions between frames
-// uint32_t calc_frame_sad(const uint8_t* __restrict ptr1,
-//                         const uint8_t* __restrict ptr2, size_t xsize,
-//                         size_t ysize, size_t stride) {
-//     uint32_t sum = 0;
-//     while (ysize-- != 0) {
-//         for (size_t i = 0; i < xsize; i++) {
-//             sum += std::abs(static_cast<int32_t>(ptr1[i]) -
-//                             static_cast<int32_t>(ptr2[i]));
-//         }
-
-//         ptr1 += stride;
-//         ptr2 += stride;
-//     }
-
-//     return sum;
-// }
-
 // how do you make a static allocation?
 
 // Move cursor up and erase line
@@ -262,7 +243,7 @@ int run_decoder(DecodeContext& dc, size_t framebuf_offset, size_t max_frames) {
                 return ret;
             }
 
-            output_index += 1;
+            output_index++;
         }
         return 0;
     };
@@ -319,7 +300,7 @@ int run_decoder(DecodeContext& dc, size_t framebuf_offset, size_t max_frames) {
         } else [[likely]] {
         }
 
-        if (output_index >= max_frames) {
+        if (output_index >= max_frames) [[unlikely]] {
             return (int)output_index;
         }
     }
@@ -363,6 +344,15 @@ auto since(std::chrono::time_point<clock_t, duration_t> const& start) {
 
 auto now() { return std::chrono::steady_clock::now(); }
 
+std::mutex global_decoder_mutex;  // NOLINT
+unsigned int global_chunk_id = 0; // NOLINT
+
+// for printing progress
+std::condition_variable cv; // NOLINT
+std::mutex cv_m;            // NOLINT
+
+std::atomic<uint32_t> num_frames_completed(0); // NOLINT
+
 int encode(AVCodecContext* enc_ctx, AVFrame* frame, AVPacket* pkt,
            FILE* ostream) {
     // frame can be null, which is considered a flush frame
@@ -388,7 +378,7 @@ int encode(AVCodecContext* enc_ctx, AVFrame* frame, AVPacket* pkt,
         (void)fwrite(pkt->data, pkt->size, 1, ostream);
 
         // just printing this takes 100ms...
-        printf("received packet from encoder of %d bytes\n", pkt->size);
+        // printf("received packet from encoder of %d bytes\n", pkt->size);
 
         av_packet_unref(pkt);
     }
@@ -443,6 +433,7 @@ int encode_frames(const char* file_name, AVFrame** frame_buffer,
         // required
         frame_buffer[i]->pict_type = AV_PICTURE_TYPE_NONE;
         encode(avcc, frame_buffer[i], pkt, file);
+        num_frames_completed++;
     }
     // need to send flush packet
     encode(avcc, nullptr, pkt, file);
@@ -462,9 +453,6 @@ int encode_chunk(unsigned int chunk_idx, AVFrame** framebuf, size_t n_frames) {
     return encode_frames(buf.data(), framebuf, n_frames);
 }
 
-std::mutex global_decoder_mutex;  // NOLINT
-unsigned int global_chunk_id = 0; // NOLINT
-
 // framebuf is start of frame buffer that worker can use
 int worker_thread(unsigned int worker_id, DecodeContext& decoder) {
     while (true) {
@@ -475,7 +463,10 @@ int worker_thread(unsigned int worker_id, DecodeContext& decoder) {
         int frames = run_decoder(decoder, worker_id * CHUNK_FRAME_SIZE,
                                  CHUNK_FRAME_SIZE);
 
+        // error decoding
         if (frames <= 0) {
+            // Is this correct?
+            cv.notify_one();
             global_decoder_mutex.unlock();
             return frames;
         }
@@ -483,7 +474,7 @@ int worker_thread(unsigned int worker_id, DecodeContext& decoder) {
         // these accesses are behind mutex so we're all good
         auto chunk_idx = global_chunk_id;
         // increment for other chunks
-        global_chunk_id += 1;
+        global_chunk_id++;
 
         // can assume frames are available, so unlock the mutex so
         // other threads can use the decoder
@@ -496,12 +487,20 @@ int worker_thread(unsigned int worker_id, DecodeContext& decoder) {
             frames);
 
         if (ret != 0) {
+            // in theory... this shouldn't need to happen as this is an encoding
+            // error
+
+            // in normal circumstances we return from infinite loop via decoding
+            // error (which we expect to be EOF).
+            cv.notify_one();
+
             return ret;
         }
     }
 }
 
-} // namespace
+void avlog_do_nothing(void* /* unused */, int /* level */,
+                      const char* /* szFmt */, va_list /* varg */) {}
 
 // assume same naming convention
 void concat_files(unsigned int num_files) {
@@ -520,10 +519,7 @@ void concat_files(unsigned int num_files) {
     dst.close();
 }
 
-static void avlog_do_nothing(void*, int level, const char* szFmt,
-                             va_list varg) {
-    // do nothing...
-}
+} // namespace
 
 int main(int argc, char** argv) {
     if (signal(SIGSEGV, segvHandler) == SIG_ERR) {
@@ -577,17 +573,48 @@ int main(int argc, char** argv) {
                                                std::ref(d_ctx));
                 }
 
+                printf("frame= 0  (0 fps)\n");
+                uint32_t last_frames = 0;
+
+                while (true) {
+                    // acquire lock on mutex I guess?
+                    std::unique_lock<std::mutex> lk(cv_m);
+
+                    auto status = cv.wait_for(lk, std::chrono::seconds(1));
+
+                    auto n_frames = num_frames_completed.load();
+                    auto frame_diff = n_frames - last_frames;
+                    last_frames = n_frames;
+                    // since we waited exactly 1 second, frame_diff is the fps.
+
+                    // print progress
+                    printf(ERASE_LINE_ANSI "frame= %d  (%d fps)\n", n_frames,
+                           frame_diff);
+
+                    if (status == std::cv_status::no_timeout) [[unlikely]] {
+                        // exit progress printing loop
+                        break;
+                    }
+                }
+
                 for (auto& t : thread_vector) {
                     t.join();
                 }
 
                 auto elapsed_ms = since(start).count();
 
-                // there is no active lock on the mutex, so this can be
-                // safely accessed
-                concat_files(global_chunk_id);
+                auto n_frames = num_frames_completed.load();
 
-                printf("Encoding took %lld ms\n", elapsed_ms);
+                auto fps = static_cast<double>(1000 * n_frames) /
+                           static_cast<double>(elapsed_ms);
+
+                printf(ERASE_LINE_ANSI
+                       "frame= %d  (%f fps)  finished in %lld ms\n",
+                       n_frames, fps, elapsed_ms);
+
+                // there is no active lock on the mutex since all threads
+                // terminated, so global_chunk_id can be safely accessed.
+                concat_files(global_chunk_id);
 
             } else if constexpr (std::is_same_v<T, DecoderCreationError>) {
                 auto error = arg;
