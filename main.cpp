@@ -512,7 +512,10 @@ void concat_files(unsigned int num_files) {
         (void)snprintf(buf.data(), buf.size(), "file %d.mp4", i);
         std::ifstream src(buf.data(), std::ios::binary);
         dst << src.rdbuf();
+        src.close();
     }
+
+    dst.close();
 }
 
 int main(int argc, char** argv) {
