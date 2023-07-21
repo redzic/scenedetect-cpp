@@ -423,7 +423,7 @@ int encode_frames(const char* file_name, AVFrame** frame_buffer,
     avcc->pix_fmt = AV_PIX_FMT_YUV420P;
 
     // av_opt_set(avcc->priv_data, "preset", "slow", 0);
-    av_opt_set(avcc->priv_data, "preset", "ultrafast", 0);
+    av_opt_set(avcc->priv_data, "preset", "veryfast", 0);
 
     int ret = avcodec_open2(avcc, codec, nullptr);
     if (ret < 0) {
@@ -572,11 +572,12 @@ int main(int argc, char** argv) {
                     t.join();
                 }
 
+                auto elapsed_ms = since(start).count();
+
                 // there is no active lock on the mutex, so this can be safely
                 // accessed
                 concat_files(chunk_id);
 
-                auto elapsed_ms = since(start).count();
                 printf("Encoding took %lld ms\n", elapsed_ms);
 
             } else if constexpr (std::is_same_v<T, DecoderCreationError>) {
