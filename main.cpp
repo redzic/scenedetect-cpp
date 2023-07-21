@@ -3,6 +3,7 @@
 #include <cerrno>
 #include <chrono>
 #include <csignal>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -248,8 +249,9 @@ int run_decoder(DecodeContext& dc, size_t framebuf_offset, size_t max_frames) {
 
     size_t output_index = 0;
 
-    auto receive_frames = [&dc, output_index, framebuf_offset,
-                           max_frames]() mutable {
+    // returns number of frames successfully decoded OR negative error
+    auto receive_frames = [&dc, max_frames, framebuf_offset,
+                           &output_index]() mutable {
         // receive last frames
         while (output_index < max_frames) {
             int ret = avcodec_receive_frame(
@@ -264,9 +266,20 @@ int run_decoder(DecodeContext& dc, size_t framebuf_offset, size_t max_frames) {
     };
 
     while (true) {
+        // Flush any frames currently in the decoder
+        //
+        // This is needed in case we send a packet, read some of its frames and
+        // stop because of max_frames, and need to keep reading frames from the
+        // decoder on the next chunk.
+
         ret = receive_frames();
-        if (ret != AVERROR(EAGAIN)) {
+        if (ret == AVERROR_EOF) [[unlikely]] {
+            return (int)output_index;
+        } else if (ret < 0 && ret != AVERROR(EAGAIN)) [[unlikely]] {
             return ret;
+        } else [[likely]] {
+            // we got AVERROR(EAGAIN), so just try sending a new
+            // packet and decoding frames from there
         }
 
         // Get packet (compressed data) from demuxer
@@ -296,11 +309,17 @@ int run_decoder(DecodeContext& dc, size_t framebuf_offset, size_t max_frames) {
         }
 
         // receive as many frames as possible up until max size
+        // TODO check error?
         ret = receive_frames();
-        // exit if output index
-        // if (ret != ) {
-        //     return ret;
-        // }
+        if (ret == AVERROR_EOF) [[unlikely]] {
+            return (int)output_index;
+        } else if (ret < 0 && ret != AVERROR(EAGAIN)) [[unlikely]] {
+            return ret;
+        } else [[likely]] {
+            // we got AVERROR(EAGAIN), so just try sending a new
+            // packet and decoding frames from there
+        }
+
         if (output_index >= max_frames) {
             return (int)output_index;
         }
@@ -308,15 +327,15 @@ int run_decoder(DecodeContext& dc, size_t framebuf_offset, size_t max_frames) {
 
     // once control flow reached here, it is guaranteed that more frames need to
     // be received to fill the buffer send flush packet
+    // TODO error handling here as well
     avcodec_send_packet(dc.decoder, nullptr);
+
     ret = receive_frames();
-    if (ret < 0) {
+    if (ret == AVERROR_EOF) {
+        return (int)output_index;
+    } else {
         return ret;
     }
-
-    printf("Received %d frames so far\n", (int)dc.decoder->frame_num);
-
-    return (int)output_index;
 }
 
 struct DecodeContextResult {
@@ -379,7 +398,7 @@ int encode_frames(const char* file_name, AVFrame** frame_buffer,
     const auto* codec = avcodec_find_encoder_by_name("libx264");
     // so avcodeccontext is used for both encoding and decoding...
     auto* avcc = avcodec_alloc_context3(codec);
-    avcc->thread_count = 2;
+    avcc->thread_count = 4;
 
     // assert(avcc);
     if (avcc == nullptr) {
@@ -391,7 +410,7 @@ int encode_frames(const char* file_name, AVFrame** frame_buffer,
 
     // Yeah this actually affects how much bitrate the
     // encode uses, it's not just metadata
-    avcc->bit_rate = 400000;
+    avcc->bit_rate = static_cast<int64_t>(40000) * 3;
 
     avcc->width = frame_buffer[0]->width;
     avcc->height = frame_buffer[0]->height;
@@ -402,7 +421,8 @@ int encode_frames(const char* file_name, AVFrame** frame_buffer,
     // avcc->max_b_frames = 1;
     avcc->pix_fmt = AV_PIX_FMT_YUV420P;
 
-    av_opt_set(avcc->priv_data, "preset", "slow", 0);
+    // av_opt_set(avcc->priv_data, "preset", "slow", 0);
+    av_opt_set(avcc->priv_data, "preset", "ultrafast", 0);
 
     int ret = avcodec_open2(avcc, codec, nullptr);
     if (ret < 0) {
@@ -442,19 +462,19 @@ int encode_chunk(unsigned int chunk_idx, AVFrame** framebuf, size_t n_frames) {
 std::mutex decoder_mutex;  // NOLINT
 unsigned int chunk_id = 0; // NOLINT
 
-// framebuf is start of 60-frame buffer that worker can use
+// framebuf is start of frame buffer that worker can use
 int worker_thread(unsigned int worker_id, DecodeContext& decoder) {
     while (true) {
         // should only access decoder once lock has been acquired
         decoder_mutex.lock();
 
-        // decode 60 frames into frame buffer
-        int ret = run_decoder(decoder, worker_id * CHUNK_FRAME_SIZE,
-                              CHUNK_FRAME_SIZE);
+        // decode CHUNK_FRAME_SIZE frames into frame buffer
+        int frames = run_decoder(decoder, worker_id * CHUNK_FRAME_SIZE,
+                                 CHUNK_FRAME_SIZE);
 
-        if (ret < 0) {
+        if (frames <= 0) {
             decoder_mutex.unlock();
-            return ret;
+            return frames;
         }
 
         // these accesses are behind mutex so we're all good
@@ -468,9 +488,9 @@ int worker_thread(unsigned int worker_id, DecodeContext& decoder) {
 
         // a little sketchy but in theory this should be fine
         // since framebuf is never modified
-        ret = encode_chunk(
+        int ret = encode_chunk(
             chunk_idx, decoder.framebuf.data() + (worker_id * CHUNK_FRAME_SIZE),
-            CHUNK_FRAME_SIZE);
+            frames);
 
         if (ret != 0) {
             return ret;
@@ -513,48 +533,29 @@ int main(int argc, char** argv) {
             if constexpr (std::is_same_v<T, DecodeContext>) {
                 auto& d_ctx = arg;
 
+                // encode frames now
+
+                // uh... we really need a safe way to do this and stuff
+                // this is really bad... just assuming enough frames are
+                // available
+
                 auto start = now();
-                int ret = 0;
-                // int ret = run_decoder(d_ctx, 0, 480);
-                auto elapsed_ms = since(start).count();
 
-                if (ret == 0) {
-                    auto frames = static_cast<size_t>(d_ctx.decoder->frame_num);
+                std::vector<std::thread> thread_vector{};
+                thread_vector.reserve(NUM_WORKERS);
 
-                    double fps = 1000.0 * (static_cast<double>(frames) /
-                                           static_cast<double>(elapsed_ms));
-
-                    printf(
-                        "Successfully decoded %d frames in %lld ms (%f fps)\n",
-                        (int)frames, elapsed_ms, fps);
-
-                    // encode frames now
-
-                    // uh... we really need a safe way to do this and stuff
-                    // this is really bad... just assuming enough frames are
-                    // available
-
-                    auto start = now();
-
-                    std::vector<std::thread> thread_vector{};
-                    thread_vector.reserve(NUM_WORKERS);
-
-                    // spawn worker threads
-                    for (unsigned int i = 0; i < NUM_WORKERS; i++) {
-                        thread_vector.emplace_back(&worker_thread, i,
-                                                   std::ref(d_ctx));
-                    }
-
-                    for (auto& t : thread_vector) {
-                        t.join();
-                    }
-
-                    auto elapsed_ms = since(start).count();
-                    printf("Encoding took %lld ms\n", elapsed_ms);
-
-                } else {
-                    printf("Decoding error! value: %d\n", ret);
+                // spawn worker threads
+                for (unsigned int i = 0; i < NUM_WORKERS; i++) {
+                    thread_vector.emplace_back(&worker_thread, i,
+                                               std::ref(d_ctx));
                 }
+
+                for (auto& t : thread_vector) {
+                    t.join();
+                }
+
+                auto elapsed_ms = since(start).count();
+                printf("Encoding took %lld ms\n", elapsed_ms);
 
             } else if constexpr (std::is_same_v<T, DecoderCreationError>) {
                 auto error = arg;
