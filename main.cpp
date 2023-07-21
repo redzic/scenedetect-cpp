@@ -2,6 +2,7 @@
 #include <cassert>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <csignal>
 #include <cstddef>
@@ -68,7 +69,7 @@ struct DecoderCreationError {
 };
 
 constexpr size_t CHUNK_FRAME_SIZE = 60;
-constexpr size_t NUM_WORKERS = 8;
+constexpr size_t NUM_WORKERS = 16;
 
 constexpr size_t framebuf_size = CHUNK_FRAME_SIZE * NUM_WORKERS;
 using FrameBuf = std::array<AVFrame*, framebuf_size>;
@@ -342,6 +343,14 @@ auto since(std::chrono::time_point<clock_t, duration_t> const& start) {
     return std::chrono::duration_cast<result_t>(clock_t::now() - start);
 }
 
+template <class result_t = std::chrono::milliseconds,
+          class clock_t = std::chrono::steady_clock,
+          class duration_t = std::chrono::milliseconds>
+auto dist_ms(std::chrono::time_point<clock_t, duration_t> const& start,
+             std::chrono::time_point<clock_t, duration_t> const& end) {
+    return std::chrono::duration_cast<result_t>(end - start);
+}
+
 auto now() { return std::chrono::steady_clock::now(); }
 
 std::mutex global_decoder_mutex;  // NOLINT
@@ -352,6 +361,7 @@ std::condition_variable cv; // NOLINT
 std::mutex cv_m;            // NOLINT
 
 std::atomic<uint32_t> num_frames_completed(0); // NOLINT
+std::array<std::atomic<bool>, NUM_WORKERS> worker_threads_finished;
 
 int encode(AVCodecContext* enc_ctx, AVFrame* frame, AVPacket* pkt,
            FILE* ostream) {
@@ -401,21 +411,19 @@ int encode_frames(const char* file_name, AVFrame** frame_buffer,
 
     auto* pkt = av_packet_alloc();
 
-    // Yeah this actually affects how much bitrate the
-    // encode uses, it's not just metadata
-    avcc->bit_rate = static_cast<int64_t>(40000) * 3;
+    // this affects how much bitrate the
+    // encoder uses, it's not just metadata
+    // avcc->bit_rate = static_cast<int64_t>(40000) * 3;
 
     avcc->width = frame_buffer[0]->width;
     avcc->height = frame_buffer[0]->height;
     avcc->time_base = (AVRational){1, 25};
     avcc->framerate = (AVRational){25, 1};
 
-    // avcc->gop_size = 60;
     // avcc->max_b_frames = 1;
     avcc->pix_fmt = AV_PIX_FMT_YUV420P;
 
     // av_opt_set(avcc->priv_data, "preset", "slow", 0);
-    // av_opt_set(avcc->priv_data, "preset", "veryfast", 0);
 
     int ret = avcodec_open2(avcc, codec, nullptr);
     if (ret < 0) {
@@ -465,7 +473,7 @@ int worker_thread(unsigned int worker_id, DecodeContext& decoder) {
 
         // error decoding
         if (frames <= 0) {
-            // Is this correct?
+            worker_threads_finished[worker_id].store(true);
             cv.notify_one();
             global_decoder_mutex.unlock();
             return frames;
@@ -473,7 +481,7 @@ int worker_thread(unsigned int worker_id, DecodeContext& decoder) {
 
         // these accesses are behind mutex so we're all good
         auto chunk_idx = global_chunk_id;
-        // increment for other chunks
+        // increment for next chunk
         global_chunk_id++;
 
         // can assume frames are available, so unlock the mutex so
@@ -489,6 +497,8 @@ int worker_thread(unsigned int worker_id, DecodeContext& decoder) {
         if (ret != 0) {
             // in theory... this shouldn't need to happen as this is an encoding
             // error
+
+            worker_threads_finished[worker_id].store(true);
 
             // in normal circumstances we return from infinite loop via decoding
             // error (which we expect to be EOF).
@@ -575,12 +585,24 @@ int main(int argc, char** argv) {
 
                 printf("frame= 0  (0 fps)\n");
                 uint32_t last_frames = 0;
-                auto n_threads_finished = 0;
+
+                auto compute_fps = [](uint32_t n_frames,
+                                      int64_t time_ms) -> double {
+                    if (time_ms <= 0) [[unlikely]] {
+                        return INFINITY;
+                    } else [[likely]] {
+                        return static_cast<double>(1000 * n_frames) /
+                               static_cast<double>(time_ms);
+                    }
+                };
 
                 while (true) {
                     // acquire lock on mutex I guess?
                     std::unique_lock<std::mutex> lk(cv_m);
 
+                    // so for some reason this notify system isn't good enough
+                    // for checking if all threads have completed.
+                    auto local_start = now();
                     auto status = cv.wait_for(lk, std::chrono::seconds(1));
 
                     auto n_frames = num_frames_completed.load();
@@ -588,32 +610,49 @@ int main(int argc, char** argv) {
                     last_frames = n_frames;
                     // since we waited exactly 1 second, frame_diff is the fps.
 
-                    // print progress
-                    printf(ERASE_LINE_ANSI "frame= %d  (%d fps)\n", n_frames,
-                           frame_diff);
+                    // actually, it's not guaranteed that we waited for exactly
+                    // 1 second... so let's measure it
 
+                    auto local_now = now();
+                    auto total_elapsed_ms = dist_ms(start, local_now).count();
+
+                    uint32_t local_fps = frame_diff;
                     if (status == std::cv_status::no_timeout) [[unlikely]] {
-                        n_threads_finished++;
-                        if (n_threads_finished == NUM_WORKERS) [[unlikely]] {
+                        // this means we didn't wait for the full time
+                        auto elapsed_local_ms =
+                            dist_ms(local_start, local_now).count();
+                        // TODO what happens when you cast INFINITY to int?
+                        // maybe fix that behavior since technically that can be
+                        // returned
+                        local_fps =
+                            (int)compute_fps(frame_diff, elapsed_local_ms);
+                    }
+
+                    // average fps from start of encoding process
+                    auto avg_fps = compute_fps(n_frames, total_elapsed_ms);
+
+                    // print progress
+                    printf(ERASE_LINE_ANSI
+                           "frame= %d  (%d fps curr, %.1f fps avg)\n",
+                           n_frames, local_fps, avg_fps);
+
+                    static_assert(NUM_WORKERS >= 1);
+                    bool are_threads_finished = true;
+                    for (auto& is_tf : worker_threads_finished) {
+                        if (!is_tf.load()) {
+                            are_threads_finished = false;
                             break;
                         }
+                    }
+
+                    if (are_threads_finished) {
+                        break;
                     }
                 }
 
                 for (auto& t : thread_vector) {
                     t.join();
                 }
-
-                auto elapsed_ms = since(start).count();
-
-                auto n_frames = num_frames_completed.load();
-
-                auto fps = static_cast<double>(1000 * n_frames) /
-                           static_cast<double>(elapsed_ms);
-
-                printf(ERASE_LINE_ANSI
-                       "frame= %d  (%f fps)  finished in %lld ms\n",
-                       n_frames, fps, elapsed_ms);
 
                 // there is no active lock on the mutex since all threads
                 // terminated, so global_chunk_id can be safely accessed.
