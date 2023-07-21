@@ -388,7 +388,7 @@ int encode(AVCodecContext* enc_ctx, AVFrame* frame, AVPacket* pkt,
 
 int encode_frames(const char* file_name, AVFrame** frame_buffer,
                   size_t frame_count) {
-    const auto* codec = avcodec_find_encoder_by_name("libx264");
+    const auto* codec = avcodec_find_encoder_by_name("librav1e");
     // so avcodeccontext is used for both encoding and decoding...
     auto* avcc = avcodec_alloc_context3(codec);
     avcc->thread_count = 4;
@@ -415,7 +415,7 @@ int encode_frames(const char* file_name, AVFrame** frame_buffer,
     avcc->pix_fmt = AV_PIX_FMT_YUV420P;
 
     // av_opt_set(avcc->priv_data, "preset", "slow", 0);
-    av_opt_set(avcc->priv_data, "preset", "veryfast", 0);
+    // av_opt_set(avcc->priv_data, "preset", "veryfast", 0);
 
     int ret = avcodec_open2(avcc, codec, nullptr);
     if (ret < 0) {
@@ -575,6 +575,7 @@ int main(int argc, char** argv) {
 
                 printf("frame= 0  (0 fps)\n");
                 uint32_t last_frames = 0;
+                auto n_threads_finished = 0;
 
                 while (true) {
                     // acquire lock on mutex I guess?
@@ -592,8 +593,10 @@ int main(int argc, char** argv) {
                            frame_diff);
 
                     if (status == std::cv_status::no_timeout) [[unlikely]] {
-                        // exit progress printing loop
-                        break;
+                        n_threads_finished++;
+                        if (n_threads_finished == NUM_WORKERS) [[unlikely]] {
+                            break;
+                        }
                     }
                 }
 
