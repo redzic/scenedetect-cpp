@@ -9,18 +9,22 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <errhandlingapi.h>
 #include <fstream>
 #include <io.h>
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <pthread.h>
 #include <thread>
 #include <unistd.h>
 #include <utility>
 #include <variant>
 #include <vector>
+#include <windows.h>
 
 extern "C" {
+
 #include <libavcodec/avcodec.h>
 #include <libavcodec/codec.h>
 #include <libavcodec/packet.h>
@@ -43,7 +47,7 @@ AlwaysInline void w_stderr(std::string_view sv) {
     write(STDERR_FILENO, sv.data(), sv.size());
 }
 
-template <typename T, auto Alloc, auto Free> auto make_managed() {
+template <typename T, auto Alloc, auto Free> auto make_resource() {
     return std::unique_ptr<T, decltype([](T* ptr) { Free(&ptr); })>(Alloc());
 }
 
@@ -68,8 +72,11 @@ struct DecoderCreationError {
     }
 };
 
+// maybe add ctrl+C interrupt that just stops and flushes all packets so far?
+
 constexpr size_t CHUNK_FRAME_SIZE = 60;
 constexpr size_t NUM_WORKERS = 16;
+constexpr size_t THREADS_PER_WORKER = 2;
 
 constexpr size_t framebuf_size = CHUNK_FRAME_SIZE * NUM_WORKERS;
 using FrameBuf = std::array<AVFrame*, framebuf_size>;
@@ -116,7 +123,7 @@ struct DecodeContext {
 
     [[nodiscard]] static std::variant<DecodeContext, DecoderCreationError>
     open(const char* url) {
-        auto pkt = make_managed<AVPacket, av_packet_alloc, av_packet_free>();
+        auto pkt = make_resource<AVPacket, av_packet_alloc, av_packet_free>();
 
         // this should work with the way smart pointers work right?
         if (pkt == nullptr) {
@@ -360,8 +367,8 @@ unsigned int global_chunk_id = 0; // NOLINT
 std::condition_variable cv; // NOLINT
 std::mutex cv_m;            // NOLINT
 
-std::atomic<uint32_t> num_frames_completed(0); // NOLINT
-std::array<std::atomic<bool>, NUM_WORKERS> worker_threads_finished;
+std::atomic<uint32_t> num_frames_completed(0);                      // NOLINT
+std::array<std::atomic<bool>, NUM_WORKERS> worker_threads_finished; // NOLINT
 
 int encode(AVCodecContext* enc_ctx, AVFrame* frame, AVPacket* pkt,
            FILE* ostream) {
@@ -375,6 +382,7 @@ int encode(AVCodecContext* enc_ctx, AVFrame* frame, AVPacket* pkt,
     while (true) {
         int ret = avcodec_receive_packet(enc_ctx, pkt);
         // why check for eof though?
+        // actually this doesn't really seem correct
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
             return 0;
         } else if (ret < 0) {
@@ -396,12 +404,31 @@ int encode(AVCodecContext* enc_ctx, AVFrame* frame, AVPacket* pkt,
     return 0;
 }
 
+AVPixelFormat av_pix_fmt_supported_version(AVPixelFormat pix_fmt) {
+    switch (pix_fmt) {
+    case AV_PIX_FMT_YUVJ420P:
+        return AV_PIX_FMT_YUV420P;
+    case AV_PIX_FMT_YUVJ422P:
+        return AV_PIX_FMT_YUV422P;
+    case AV_PIX_FMT_YUVJ444P:
+        return AV_PIX_FMT_YUV444P;
+    case AV_PIX_FMT_YUVJ440P:
+        return AV_PIX_FMT_YUV440P;
+    case AV_PIX_FMT_YUVJ411P:
+        return AV_PIX_FMT_YUV411P;
+    default:
+        return pix_fmt;
+    }
+}
+
 int encode_frames(const char* file_name, AVFrame** frame_buffer,
                   size_t frame_count) {
-    const auto* codec = avcodec_find_encoder_by_name("librav1e");
+    assert(frame_count >= 1);
+
+    const auto* codec = avcodec_find_encoder_by_name("libaom-av1");
     // so avcodeccontext is used for both encoding and decoding...
     auto* avcc = avcodec_alloc_context3(codec);
-    avcc->thread_count = 4;
+    avcc->thread_count = THREADS_PER_WORKER;
 
     // assert(avcc);
     if (avcc == nullptr) {
@@ -420,10 +447,15 @@ int encode_frames(const char* file_name, AVFrame** frame_buffer,
     avcc->time_base = (AVRational){1, 25};
     avcc->framerate = (AVRational){25, 1};
 
-    // avcc->max_b_frames = 1;
-    avcc->pix_fmt = AV_PIX_FMT_YUV420P;
+    avcc->pix_fmt =
+        av_pix_fmt_supported_version((AVPixelFormat)frame_buffer[0]->format);
 
-    // av_opt_set(avcc->priv_data, "preset", "slow", 0);
+    av_opt_set(avcc->priv_data, "cpu-used", "6", 0);
+    av_opt_set(avcc->priv_data, "end-usage", "q", 0);
+    av_opt_set(avcc->priv_data, "enable-qm", "1", 0);
+    av_opt_set(avcc->priv_data, "cq-level", "18", 0);
+
+    // av_opt_set(avcc->priv_data, "speed", "7", 0);
 
     int ret = avcodec_open2(avcc, codec, nullptr);
     if (ret < 0) {
@@ -581,6 +613,52 @@ int main(int argc, char** argv) {
                 for (unsigned int i = 0; i < NUM_WORKERS; i++) {
                     thread_vector.emplace_back(&worker_thread, i,
                                                std::ref(d_ctx));
+
+                // maybe this isn't the best approach since the decoder has to
+                // switch around which thread it's on
+
+                // thread affinity setting for Windows (mingw, pthread)
+
+#if 0
+                    static_assert(THREADS_PER_WORKER * NUM_WORKERS <= 64);
+                    uint64_t affinity_mask = (1 << THREADS_PER_WORKER) - 1;
+                    affinity_mask <<= THREADS_PER_WORKER * i;
+                    auto thread_handle = thread_vector[i].native_handle();
+
+                    // uh... this code is going to have to be different
+                    // depending on the compiler.
+
+                    auto actual_native_handle =
+                        pthread_gethandle(thread_handle);
+
+                    if (SetThreadAffinityMask(actual_native_handle,
+                                              affinity_mask) == 0) {
+                        DWORD errorCode = GetLastError();
+
+                        // Retrieve the error message
+                        LPSTR messageBuffer = nullptr;
+                        FormatMessageA(
+                            FORMAT_MESSAGE_ALLOCATE_BUFFER |
+                                FORMAT_MESSAGE_FROM_SYSTEM |
+                                FORMAT_MESSAGE_IGNORE_INSERTS,
+                            nullptr, errorCode,
+                            MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+                            reinterpret_cast<LPSTR>(&messageBuffer), 0,
+                            nullptr);
+
+                        // Print the error message
+                        if (messageBuffer) {
+                            std::cerr << "Error: " << messageBuffer
+                                      << std::endl;
+
+                            // Free the message buffer
+                            LocalFree(messageBuffer);
+                        } else {
+                            std::cerr << "Error: Unknown error occurred."
+                                      << std::endl;
+                        }
+                    }
+#endif
                 }
 
                 printf("frame= 0  (0 fps)\n");
@@ -631,6 +709,9 @@ int main(int argc, char** argv) {
                     // average fps from start of encoding process
                     auto avg_fps = compute_fps(n_frames, total_elapsed_ms);
 
+                    // TODO fix int overflow, I think it happens when
+                    // 0ms were measured...
+
                     // print progress
                     printf(ERASE_LINE_ANSI
                            "frame= %d  (%d fps curr, %.1f fps avg)\n",
@@ -650,6 +731,8 @@ int main(int argc, char** argv) {
                     }
                 }
 
+                // In theory all the threads have already exited here
+                // but we need to call .join() anyways.
                 for (auto& t : thread_vector) {
                     t.join();
                 }
