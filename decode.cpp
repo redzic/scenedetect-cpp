@@ -90,6 +90,15 @@ DecodeContext::open(const char* url) {
     // set automatic threading
     decoder->thread_count = 0;
 
+    // AVCodecContext allocated with alloc context
+    // previously was allocated with non-NULL codec,
+    // so we can pass NULL here.
+    int ret = avcodec_open2(decoder.get(), nullptr, nullptr);
+    if (ret < 0) [[unlikely]] {
+        return {DecoderCreationError{.type = DecoderCreationError::AVError,
+                                     .averror = ret}};
+    }
+
     return std::variant<DecodeContext, DecoderCreationError>{
         std::in_place_type<DecodeContext>,
         demuxer.release(),
@@ -100,20 +109,15 @@ DecodeContext::open(const char* url) {
 }
 
 int run_decoder(DecodeContext& dc, size_t framebuf_offset, size_t max_frames) {
+    // TODO could possibly add a check/method in DecodeContext to ensure
+    // it's initialized fully before use.
+
     assert(max_frames > 0);
     assert(max_frames <= dc.framebuf.size());
     if ((framebuf_offset + max_frames - 1) >= dc.framebuf.size() ||
         framebuf_offset >= dc.framebuf.size()) {
         // bounds check failed
         return -1;
-    }
-
-    // AVCodecContext allocated with alloc context
-    // previously was allocated with non-NULL codec,
-    // so we can pass NULL here.
-    int ret = avcodec_open2(dc.decoder, nullptr, nullptr);
-    if (ret < 0) [[unlikely]] {
-        return ret;
     }
 
     size_t output_index = 0;
@@ -146,7 +150,7 @@ int run_decoder(DecodeContext& dc, size_t framebuf_offset, size_t max_frames) {
         // decoder on the next chunk.
 
         // TODO deduplicate this code
-        ret = receive_frames();
+        int ret = receive_frames();
         if (ret == AVERROR_EOF) [[unlikely]] {
             return (int)output_index;
         } else if (ret < 0 && ret != AVERROR(EAGAIN)) [[unlikely]] {
@@ -201,7 +205,7 @@ int run_decoder(DecodeContext& dc, size_t framebuf_offset, size_t max_frames) {
     // TODO error handling here as well
     avcodec_send_packet(dc.decoder, nullptr);
 
-    ret = receive_frames();
+    int ret = receive_frames();
     if (ret == AVERROR_EOF || ret == 0) {
         return (int)output_index;
     } else {

@@ -41,6 +41,8 @@ extern "C" {
 
 namespace {
 
+#define ERASE_LINE_ANSI "\x1B[1A\x1B[2K" // NOLINT
+
 #define AlwaysInline __attribute__((always_inline)) inline
 
 AlwaysInline void w_stderr(std::string_view sv) {
@@ -406,6 +408,13 @@ int main(int argc, char** argv) {
 
             if constexpr (std::is_same_v<T, DecodeContext>) {
                 main_encode_loop(arg);
+
+                // int frames = decode_loop(arg);
+                // printf("decoded %d frames\n", frames);
+
+                // assert(run_decoder(arg, 0, 60) == 60);
+                // printf("initial decode of 60 frames succeeded\n");
+
             } else if constexpr (std::is_same_v<T, DecoderCreationError>) {
                 auto error = arg;
 

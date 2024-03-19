@@ -54,7 +54,7 @@ struct DecoderCreationError {
 // maybe add ctrl+C interrupt that just stops and flushes all packets so far?
 
 constexpr size_t CHUNK_FRAME_SIZE = 60;
-constexpr size_t NUM_WORKERS = 16;
+constexpr size_t NUM_WORKERS = 4;
 constexpr size_t THREADS_PER_WORKER = 2;
 
 constexpr size_t framebuf_size = CHUNK_FRAME_SIZE * NUM_WORKERS;
@@ -100,6 +100,7 @@ struct DecodeContext {
         : demuxer(demuxer_), stream(stream_), decoder(decoder_), pkt(pkt_),
           framebuf(frame_) {}
 
+    // Open file and initialize video decoder.
     [[nodiscard]] static std::variant<DecodeContext, DecoderCreationError>
     open(const char* url);
 };
@@ -107,7 +108,6 @@ struct DecodeContext {
 // how do you make a static allocation?
 
 // Move cursor up and erase line
-#define ERASE_LINE_ANSI "\x1B[1A\x1B[2K" // NOLINT
 
 // Honestly this is kinda messed up.
 // I think I should double check that all the ffmpeg errors have a negative
@@ -131,3 +131,14 @@ struct DecodeContextResult {
     // if err.averror was non
     DecoderCreationError err;
 };
+
+[[nodiscard]] inline int decode_loop(DecodeContext& dc) {
+    // returns number of frames decoded
+
+    int framecount = 0;
+    while (run_decoder(dc, 0, 1) > 0) {
+        framecount++;
+    }
+
+    return framecount;
+}
