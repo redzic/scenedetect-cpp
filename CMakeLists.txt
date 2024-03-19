@@ -17,8 +17,8 @@ set(CMAKE_COLOR_DIAGNOSTICS ON)
 # required for no dependencies on Windows (other than ffmpeg shared libs)
 
 # compile options needed for self-contained binary
-add_compile_options(-static-libstdc++ -static-libgcc -static)
-add_link_options(-static-libstdc++ -static-libgcc -static)
+# add_compile_options(-static-libstdc++ -static-libgcc -static)
+# add_link_options(-static-libstdc++ -static-libgcc -static)
 
 add_compile_options(-fno-exceptions -fno-rtti)
 add_link_options(-fno-exceptions -fno-rtti)
@@ -34,8 +34,8 @@ pkg_check_modules(LIBAV REQUIRED IMPORTED_TARGET
     libavutil
 )
 
-add_executable(scenedetect main.cpp)
+add_executable(scenedetect main.cpp decode.cpp)
 
-target_compile_options(scenedetect PRIVATE -Wall -Wextra -Wformat )
+target_compile_options(scenedetect PRIVATE -Wall -Wextra -Wformat -Wno-c99-designator )
 target_link_libraries( scenedetect PkgConfig::LIBAV )
 target_include_directories(scenedetect PRIVATE ./third_party/ffmpeg_build/include)
