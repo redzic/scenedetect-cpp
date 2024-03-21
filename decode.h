@@ -51,6 +51,20 @@ struct DecoderCreationError {
     }
 };
 
+// Returns index of video stream, or -1 if it was not found.
+[[nodiscard]] inline int get_video_stream_index(AVFormatContext* demuxer) {
+    // find stream idx of video stream
+    for (unsigned int stream_idx = 0; stream_idx < demuxer->nb_streams;
+         stream_idx++) {
+        if (demuxer->streams[stream_idx]->codecpar->codec_type ==
+            AVMEDIA_TYPE_VIDEO) {
+            return static_cast<int>(stream_idx);
+        }
+    }
+    // No stream available.
+    return -1;
+}
+
 // maybe add ctrl+C interrupt that just stops and flushes all packets so far?
 
 constexpr size_t CHUNK_FRAME_SIZE = 60;
@@ -68,6 +82,18 @@ struct DecodeContext {
 
     AVPacket* pkt{nullptr};
     FrameBuf framebuf{};
+
+    // -1 if not initialized; else the index of the video stream
+    int video_stream_index = -1;
+
+    // gets the index of the video stream.
+    // Populates it if not available.
+    // TODO error handling
+    // If it returns -1, that means there was no video stream available.
+    // TODO should figure out how to make wrapper class where
+    // positive values indicates whatever, and negative values indicate
+    // error. Ideally with zero overhead. Because variant will take up
+    // many more bytes. Shouldn't be used for this kinda stuff.
 
     DecodeContext() = delete;
 
@@ -132,13 +158,33 @@ struct DecodeContextResult {
     DecoderCreationError err;
 };
 
+// returns number of frames decoded
 [[nodiscard]] inline int decode_loop(DecodeContext& dc) {
-    // returns number of frames decoded
 
     int framecount = 0;
-    while (run_decoder(dc, 0, 1) > 0) {
-        framecount++;
+    while (true) {
+        int ret = run_decoder(dc, 0, 1);
+        if (ret <= 0) {
+            break;
+        }
+        framecount += ret;
     }
 
     return framecount;
 }
+
+struct CountFramesResult {
+    // TODO we need better signaling of this and whatnot
+    // Probably make a struct where we have a separate
+    // CountFramesResult and another thingy which is
+    // the more detailed error information or whatever.
+
+    // TODO check if order of this shit matters cuz I could kinda optimized
+    // based on what we need to most probably access
+
+    bool error_occurred : 1;
+    unsigned int nb_discarded : 30;
+    unsigned int frame_count : 31;
+};
+
+[[nodiscard]] CountFramesResult count_frames(DecodeContext& dc);

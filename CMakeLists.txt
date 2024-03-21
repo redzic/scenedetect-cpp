@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.26)
 project(scenedetect)
 
 set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_BUILD_TYPE Debug)
 set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
@@ -20,8 +21,10 @@ set(CMAKE_COLOR_DIAGNOSTICS ON)
 # add_compile_options(-static-libstdc++ -static-libgcc -static)
 # add_link_options(-static-libstdc++ -static-libgcc -static)
 
-add_compile_options(-fno-exceptions -fno-rtti)
-add_link_options(-fno-exceptions -fno-rtti)
+# Turning off exceptions causes the program to abort
+# if an exception is thrown.
+# add_compile_options(-fno-exceptions -fno-rtti)
+# add_link_options(-fno-exceptions -fno-rtti)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBAV REQUIRED IMPORTED_TARGET

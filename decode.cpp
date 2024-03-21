@@ -1,6 +1,10 @@
 #include "decode.h"
+#include "libavcodec/avcodec.h"
+#include "libavcodec/packet.h"
+#include "libavformat/avformat.h"
 
 #include <cassert>
+#include <cstdint>
 
 std::variant<DecodeContext, DecoderCreationError>
 DecodeContext::open(const char* url) {
@@ -46,16 +50,17 @@ DecodeContext::open(const char* url) {
     avformat_find_stream_info(demuxer.get(), nullptr);
 
     // find stream idx of video stream
-    int stream_idx = [](AVFormatContext* demuxer) {
-        for (unsigned int stream_idx = 0; stream_idx < demuxer->nb_streams;
-             stream_idx++) {
-            if (demuxer->streams[stream_idx]->codecpar->codec_type ==
-                AVMEDIA_TYPE_VIDEO) {
-                return static_cast<int>(stream_idx);
-            }
-        }
-        return -1;
-    }(demuxer.get());
+    // int stream_idx = [](AVFormatContext* demuxer) {
+    //     for (unsigned int stream_idx = 0; stream_idx < demuxer->nb_streams;
+    //          stream_idx++) {
+    //         if (demuxer->streams[stream_idx]->codecpar->codec_type ==
+    //             AVMEDIA_TYPE_VIDEO) {
+    //             return static_cast<int>(stream_idx);
+    //         }
+    //     }
+    //     return -1;
+    // }(demuxer.get());
+    int stream_idx = get_video_stream_index(demuxer.get());
 
     if (stream_idx < 0) {
         return {DecoderCreationError{
@@ -211,4 +216,34 @@ int run_decoder(DecodeContext& dc, size_t framebuf_offset, size_t max_frames) {
     } else {
         return ret;
     }
+}
+
+// TODO check if there's some kind of abstraction layer where I can
+// do like generalizeed shit with bitflags and stuff. I mean
+// ig there is and that's kinda built into the language or whatever.
+
+CountFramesResult count_frames(DecodeContext& dc) {
+    // probably a bunch of memory leaks in here but whatever
+    int stream_idx = get_video_stream_index(dc.demuxer);
+
+    AVPacket* pkt = av_packet_alloc();
+
+    unsigned int pkt_count = 0;
+    unsigned int nb_discarded = 0;
+    // TODO error handling
+    while (av_read_frame(dc.demuxer, pkt) == 0) {
+        if (pkt->stream_index == stream_idx) {
+            if ((pkt->flags & AV_PKT_FLAG_DISCARD) != 0) {
+                nb_discarded++;
+            } else {
+                pkt_count++;
+            }
+        }
+    }
+
+    return CountFramesResult{
+        .error_occurred = false,
+        .nb_discarded = nb_discarded,
+        .frame_count = pkt_count,
+    };
 }

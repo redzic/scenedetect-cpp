@@ -376,6 +376,39 @@ void main_encode_loop(DecodeContext& d_ctx) {
     concat_files(global_chunk_id);
 }
 
+void identify_broken_segments() {
+    unsigned int framesum = 0;
+    for (int i = 0; i <= 29; i++) {
+        // Does not using the {} braces leave this totally
+        // uninitialized?
+        std::array<char, 128> fpath{};
+        // TODO need to find out if I'm relying on zero initialization
+        // or if snprintf here outputs the null terminator.
+        // TODO remove hard coded values, just operate in current folder for now
+        (void)snprintf(fpath.data(), fpath.size(),
+                       "/home/yusuf/avdist/OUTPUT%d.mp4", i);
+
+        // Now I need to write a concatenation function.
+
+        auto vdec = DecodeContext::open(fpath.data());
+        // TODO make sure with all this stuff everything correctly gets
+        // closed and stuff
+        auto frames = count_frames(std::get<DecodeContext>(vdec));
+        printf("[%d]frames: %d\n", i, frames.frame_count);
+
+        if (frames.nb_discarded != 0) {
+            printf(" INFO index %d, frame counts differ: %d (all packets) - %d "
+                   "(decodable only)\n",
+                   i, frames.frame_count + frames.nb_discarded,
+                   frames.frame_count);
+        }
+
+        assert(frames.frame_count > 0);
+        framesum += frames.frame_count;
+    }
+    printf("Framesum: %d\n", framesum);
+}
+
 int main(int argc, char** argv) {
     if (signal(SIGSEGV, segvHandler) == SIG_ERR) {
         w_stderr(
@@ -383,16 +416,7 @@ int main(int argc, char** argv) {
         return -1;
     }
 
-    if (argc != 2) {
-        w_stderr("scenedetect-cpp: invalid number of arguments\n"
-                 "   usage: scenedetect-cpp  <video_file>\n");
-        return -1;
-    }
-
     // can assume argv[1] is now available
-    char* url = argv[1];
-
-    auto vdec = DecodeContext::open(url);
 
     // so as soon as you use something like std::cout, the binary size increases
     // greatly...
@@ -400,7 +424,25 @@ int main(int argc, char** argv) {
     // so we should probably find a way to not use things that increase the
     // binary size a lot...
 
+    // bro WHY are there dropped frames...
+    // when decoding man... I just don't get all of them.
+
+    // TODO allow setting log level via CLI
     av_log_set_callback(avlog_do_nothing);
+
+    // TODO move all this to another function
+
+    return 0;
+
+    if (argc != 2) {
+        w_stderr("scenedetect-cpp: invalid number of arguments\n"
+                 "   usage: scenedetect-cpp  <video_file>\n");
+        return -1;
+    }
+
+    char* url = argv[1];
+
+    auto vdec = DecodeContext::open(url);
 
     std::visit(
         [](auto&& arg) {
