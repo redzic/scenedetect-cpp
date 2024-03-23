@@ -9,6 +9,7 @@
 #include <string_view>
 #include <unistd.h>
 #include <variant>
+#include <vector>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -24,6 +25,9 @@ extern "C" {
 #include <libavutil/pixfmt.h>
 #include <libavutil/rational.h>
 }
+
+extern std::vector<int64_t> dts_timestamps;
+extern std::vector<int64_t> pts_timestamps;
 
 struct DecoderCreationError {
     enum DCErrorType : uint8_t {

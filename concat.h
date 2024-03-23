@@ -1,5 +1,6 @@
 #pragma once
 
+#include "decode.h"
 #include "resource.h"
 
 #include <cassert>
@@ -20,6 +21,9 @@ extern "C" {
 #include <libavutil/rational.h>
 }
 
+// alright I'm gonna manually check
+// what can be done about these timestamps.
+
 // Something needs to be done about these damn timestamps man.
 
 // So I think after segmenting the ORIGINAL timestamps need to be
@@ -27,8 +31,10 @@ extern "C" {
 
 // or perhaps these should be string_views
 // int concat_video(const char* f1, const char* f2) {
-[[nodiscard]] inline int concat_video(unsigned int i,
-                                      const char* out_filename) {
+// concats i-1 and i
+[[nodiscard]] inline int
+concat_video(unsigned int i, const char* out_filename,
+             const std::vector<size_t>& packet_offsets) {
     assert(i >= 1);
 
     int ret = 0;
@@ -113,6 +119,8 @@ extern "C" {
     ofmt = ofmt_ctx->oformat;
     assert(ofmt != nullptr);
 
+    size_t pkt_index = 0;
+
     {
         auto* in_stream = ifmt_ctx->streams[video_idx];
         AVCodecParameters* in_codecpar = in_stream->codecpar;
@@ -149,9 +157,6 @@ extern "C" {
         }
     }
 
-    // yeah so we REALLY can't rely on filenames to correctly
-    // detect the number of segments written, unfortunately.
-
     ret = avformat_write_header(ofmt_ctx, nullptr);
     if (ret < 0) {
         fprintf(stderr, "Error occurred when opening output file\n");
@@ -175,11 +180,30 @@ extern "C" {
         auto* out_stream = ofmt_ctx->streams[pkt->stream_index];
 
         /* copy packet */
-        av_packet_rescale_ts(pkt.get(), in_stream->time_base,
-                             out_stream->time_base);
+        // av_packet_rescale_ts(pkt.get(), in_stream->time_base,
+        //                      out_stream->time_base);
+        // printf("pkt dts: %d (> last dts? %d)\n", (int)pkt->dts,
+        //        (int)(pkt->dts > last_dts));
+        //    chat we might have to do direct copy of timestamps and stuff
+
+        // also we might wanna see if it's possible to check for re ordering of
+        // timestamps
+
+        // last_dts = pkt->dts;
+        // last_dts = pkt->pts;
+        // pkt->dts = AV_NOPTS_VALUE;
+
+        // ok so manually doing this actually does fix the issue of
+        // timestamps. We should probably double check that segment
+        // puts packets in the same order they come tho.
+
+        // also holy shit this code needs to be massively cleaned up.
+
+        pkt->dts = dts_timestamps[packet_offsets[i - 1] + (pkt_index)];
+        pkt->pts = pts_timestamps[packet_offsets[i - 1] + (pkt_index++)];
         pkt->pos = -1;
 
-        ret = av_write_frame(ofmt_ctx, pkt.get());
+        ret = av_interleaved_write_frame(ofmt_ctx, pkt.get());
         /* pkt is now blank (av_interleaved_write_frame() takes ownership of
          * its contents and resets pkt), so that no unreferencing is necessary.
          * This would be different if one used av_write_frame(). */

@@ -391,13 +391,20 @@ void main_encode_loop(DecodeContext& d_ctx) {
     concat_files(global_chunk_id);
 }
 
+// each index tells you the packet offset for that segment
+// for both dts and pts, of course.
+std::vector<size_t> packet_offsets{};
+
+// this code is so incredibly messy bro
+
 // I guess maybe this should iterate backwards
 // from max index to 0, that way when a thing happens.
 // we can avoid double counting the segments. oR wait...
 // maybe not.
-void identify_broken_segments(unsigned int num_segments) {
+void identify_broken_segments(unsigned int num_segments, bool concat_broken) {
     unsigned int framesum = 0;
     unsigned int nb_discarded = 0;
+    size_t p_offset = 0;
     for (unsigned int i = 0; i < num_segments; i++) {
         // Does not using the {} braces leave this totally
         // uninitialized?
@@ -424,11 +431,21 @@ void identify_broken_segments(unsigned int num_segments) {
                    i, frames.frame_count + frames.nb_discarded,
                    frames.frame_count);
             nb_discarded += frames.nb_discarded;
-            std::array<char, 32> buf{};
+            std::array<char, 64> buf{};
             // TODO switch to mkv
-            (void)snprintf(buf.data(), buf.size(), "OUTPUT_%d_%d.mkv", i - 1,
+            (void)snprintf(buf.data(), buf.size(), "OUTPUT_%d_%d.mp4", i - 1,
                            i);
-            // assert(concat_video(i, buf.data()) == 0);
+            if (concat_broken) {
+                assert(concat_video(i, buf.data(), packet_offsets) == 0);
+            }
+        }
+
+        // frame count + discarded gives total packet count (guaranteed)
+
+        // packet_counts.
+        if (!concat_broken) {
+            packet_offsets.push_back(p_offset);
+            p_offset += frames.frame_count + frames.nb_discarded;
         }
 
         assert(frames.frame_count > 0);
@@ -467,19 +484,45 @@ int main(int argc, char** argv) {
     // }
 
     // char* url = argv[1];
+
+    // I think maybe next step will be cleaning up the code. So that it will be
+    // feasible to continue working on this.
+
+    // TODO maybe add option to not copy timestamps.
+    // Dang this stuff is complicated.
+
     const char* url = "/home/yusuf/avdist/test_x265.mp4";
+
+    unsigned int nb_segments = 0;
+    assert(segment_video(url, "OUTPUT%d.mp4", nb_segments) == 0);
+
+    identify_broken_segments(30, false);
+    printf("pkt_offsets %d, nb_timestamps %d\n", packet_offsets.size(),
+           dts_timestamps.size());
+
+    identify_broken_segments(30, true);
+
+    // perhaps I should check if packets are reordered by the segment muxer.
+    // but let me just try direct copying of original dts packets.
+
+    auto vdec2 = DecodeContext::open(url);
+    // TODO make sure with all this stuff everything correctly gets
+    // closed and stuff
+    // TODO error handling: access variant properly.
+    // auto frames = count_video_packets(std::get<DecodeContext>(vdec2));
+
+    return 0;
 
     // av_log_set_callback(av_log_TEST_CALLBACK);
     // av_log_set_level(AV_LOG_VERBOSE);
 
     // segment_video("/home/yusuf/avdist/test_x265.mp4", "OUTPUT%d.mp4");
-    // unsigned int nb_segments = 0;
-    // assert(segment_video(url, "OUTPUT%d.mp4", nb_segments) == 0);
-    unsigned int nb_segments = 83;
+    // so concat code works perfectly fine
+    // unsigned int nb_segments = 30;
 
     // TODO: Dynamically count number of segments made.
     // Is there a way to do that from ffmpeg directly?
-    identify_broken_segments(nb_segments);
+    // identify_broken_segments(nb_segments);
 
     // can assume argv[1] is now available
 

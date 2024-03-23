@@ -7,6 +7,8 @@ libav. It would be a big hassle to support multiple versions.
 - Do not use C++ streams (iostream,fstream). They are very slow.
 
 TODO:
+- add experimental disclaimer with possibly not working codecs
+  and all that
     - Add basic tests
     - Add fuzzing
     - Test with ASan/UBSan/all that stuff

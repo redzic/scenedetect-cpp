@@ -7,6 +7,9 @@
 
 #include <cassert>
 
+std::vector<int64_t> dts_timestamps{};
+std::vector<int64_t> pts_timestamps{};
+
 std::variant<DecodeContext, DecoderCreationError>
 DecodeContext::open(const char* url) {
     auto pkt = make_resource<AVPacket, av_packet_alloc, av_packet_free>();
@@ -219,6 +222,10 @@ int run_decoder(DecodeContext& dc, size_t framebuf_offset, size_t max_frames) {
 // do like generalizeed shit with bitflags and stuff. I mean
 // ig there is and that's kinda built into the language or whatever.
 
+// jesus dude this is insanely messy
+// TODO FIX
+// maybe copy pts too
+
 // by counting packets
 CountFramesResult count_video_packets(DecodeContext& dc) {
     // probably a bunch of memory leaks in here but whatever
@@ -242,6 +249,10 @@ CountFramesResult count_video_packets(DecodeContext& dc) {
         } else {
             pkt_count++;
         }
+        dts_timestamps.push_back(pkt->dts);
+        pts_timestamps.push_back(pkt->pts);
+        // TODO remove
+        // printf("Pkt dts: %ld\n", pkt->dts);
     }
 
     return CountFramesResult{
