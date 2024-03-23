@@ -9,25 +9,24 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-// #include <errhandlingapi.h>
 #include <fstream>
-// #include <io.h>
-#include <iostream>
 #include <mutex>
 #include <pthread.h>
 #include <thread>
 #include <unistd.h>
 #include <variant>
 #include <vector>
-// #include <windows.h>
 
+#include "concat.h"
 #include "decode.h"
+#include "segment.h"
 
 extern "C" {
 
 #include <libavcodec/avcodec.h>
 #include <libavcodec/codec.h>
 #include <libavcodec/packet.h>
+#include <libavfilter/avfilter.h>
 #include <libavformat/avformat.h>
 #include <libavutil/avutil.h>
 #include <libavutil/dict.h>
@@ -53,7 +52,8 @@ AlwaysInline void w_stderr(std::string_view sv) {
 // unref before you reuse AVPacket or AVFrame
 
 void segvHandler(int /*unused*/) {
-    w_stderr("Segmentation Fault\n");
+    w_stderr(
+        "Segmentation fault occurred. Please file a bug report on GitHub.\n");
     exit(EXIT_FAILURE); // NOLINT
 }
 
@@ -81,7 +81,14 @@ unsigned int global_chunk_id = 0; // NOLINT
 
 // for printing progress
 std::condition_variable cv; // NOLINT
-std::mutex cv_m;            // NOLINT
+// is mutex fast?
+// is memcpy optimized on windows? Memchr sure isn't.
+// is there a "runtime" that provides optimized implementations?
+// can I override the standard memcpy/memchr functions?
+std::mutex cv_m; // NOLINT
+
+// are exceptions slow? What's the fastest way to do
+// error handling?
 
 std::atomic<uint32_t> num_frames_completed(0);                      // NOLINT
 std::array<std::atomic<bool>, NUM_WORKERS> worker_threads_finished; // NOLINT
@@ -257,16 +264,24 @@ int worker_thread(unsigned int worker_id, DecodeContext& decoder) {
     }
 }
 
-void avlog_do_nothing(void* /* unused */, int /* level */,
-                      const char* /* szFmt */, va_list /* varg */) {}
+// void avlog_do_nothing(void* /* unused */, int /* level */,
+//                       const char* /* szFmt */, va_list /* varg */) {}
+
+// so I mean as hack we could do this dumb shit
+// with checking the callback stuff...
+// void av_log_TEST_CALLBACK(void* ptr, int level, const char* fmt, va_list vl)
+// {
+//     printf("%s\n", fmt);
+// }
 
 // assume same naming convention
+// this is direct concatenation
+// hardcoded. TODO remove.
 void concat_files(unsigned int num_files) {
     std::array<char, 64> buf{};
 
     std::ofstream dst("output.mp4", std::ios::binary);
 
-    // TODO convert to faster loop using read/write directly
     for (unsigned int i = 0; i < num_files; i++) {
         (void)snprintf(buf.data(), buf.size(), "file %d.mp4", i);
         std::ifstream src(buf.data(), std::ios::binary);
@@ -376,24 +391,31 @@ void main_encode_loop(DecodeContext& d_ctx) {
     concat_files(global_chunk_id);
 }
 
-void identify_broken_segments() {
+// I guess maybe this should iterate backwards
+// from max index to 0, that way when a thing happens.
+// we can avoid double counting the segments. oR wait...
+// maybe not.
+void identify_broken_segments(unsigned int num_segments) {
     unsigned int framesum = 0;
-    for (int i = 0; i <= 29; i++) {
+    unsigned int nb_discarded = 0;
+    for (unsigned int i = 0; i < num_segments; i++) {
         // Does not using the {} braces leave this totally
         // uninitialized?
+        // TODO replace with {fmt}
+        // and don't use iostream anywhere.
         std::array<char, 128> fpath{};
         // TODO need to find out if I'm relying on zero initialization
         // or if snprintf here outputs the null terminator.
         // TODO remove hard coded values, just operate in current folder for now
-        (void)snprintf(fpath.data(), fpath.size(),
-                       "/home/yusuf/avdist/OUTPUT%d.mp4", i);
+        (void)snprintf(fpath.data(), fpath.size(), "OUTPUT%d.mp4", i);
 
         // Now I need to write a concatenation function.
 
         auto vdec = DecodeContext::open(fpath.data());
         // TODO make sure with all this stuff everything correctly gets
         // closed and stuff
-        auto frames = count_frames(std::get<DecodeContext>(vdec));
+        // TODO error handling: access variant properly.
+        auto frames = count_video_packets(std::get<DecodeContext>(vdec));
         printf("[%d]frames: %d\n", i, frames.frame_count);
 
         if (frames.nb_discarded != 0) {
@@ -401,20 +423,63 @@ void identify_broken_segments() {
                    "(decodable only)\n",
                    i, frames.frame_count + frames.nb_discarded,
                    frames.frame_count);
+            nb_discarded += frames.nb_discarded;
+            std::array<char, 32> buf{};
+            // TODO switch to mkv
+            (void)snprintf(buf.data(), buf.size(), "OUTPUT_%d_%d.mkv", i - 1,
+                           i);
+            // assert(concat_video(i, buf.data()) == 0);
         }
 
         assert(frames.frame_count > 0);
         framesum += frames.frame_count;
     }
-    printf("Framesum: %d\n", framesum);
+    printf("Framesum: %d\nTotal packets: %d\n", framesum,
+           framesum + nb_discarded);
 }
 
+// I think we just need to configure the AVOutputFormat propertly.
+// It seems like if this is null, the output format is guessed
+// based on the file extension.
+
+// TODO: replace manual loop over streams with av_find_best_stream or whatever
+
+// For concat I really don't know if I should use the concat
+// filter or just directly put the packets next to each other.
+// Probably better to use concat filter I guess.
+
 int main(int argc, char** argv) {
-    if (signal(SIGSEGV, segvHandler) == SIG_ERR) {
-        w_stderr(
-            "signal(): failed to set SIGSEGV signal handler, aborting...\n");
-        return -1;
-    }
+
+    // if (signal(SIGSEGV, segvHandler) == SIG_ERR) {
+    //     w_stderr(
+    //         "signal(): failed to set SIGSEGV signal handler, aborting...\n");
+    //     return -1;
+    // }
+
+    // yeah so I'm pretty sure this works by just passing a fucking text file
+    // into the url or whatever... fucking retarded. But whatever still better
+    // than doing the command line which would be the same shit.
+
+    // if (argc != 2) {
+    //     w_stderr("DiViEn: invalid number of arguments\n"
+    //              "   usage: DiViEn  <video_file>\n");
+    //     return -1;
+    // }
+
+    // char* url = argv[1];
+    const char* url = "/home/yusuf/avdist/test_x265.mp4";
+
+    // av_log_set_callback(av_log_TEST_CALLBACK);
+    // av_log_set_level(AV_LOG_VERBOSE);
+
+    // segment_video("/home/yusuf/avdist/test_x265.mp4", "OUTPUT%d.mp4");
+    // unsigned int nb_segments = 0;
+    // assert(segment_video(url, "OUTPUT%d.mp4", nb_segments) == 0);
+    unsigned int nb_segments = 83;
+
+    // TODO: Dynamically count number of segments made.
+    // Is there a way to do that from ffmpeg directly?
+    identify_broken_segments(nb_segments);
 
     // can assume argv[1] is now available
 
@@ -426,21 +491,17 @@ int main(int argc, char** argv) {
 
     // bro WHY are there dropped frames...
     // when decoding man... I just don't get all of them.
-
-    // TODO allow setting log level via CLI
-    av_log_set_callback(avlog_do_nothing);
-
-    // TODO move all this to another function
-
     return 0;
 
-    if (argc != 2) {
-        w_stderr("scenedetect-cpp: invalid number of arguments\n"
-                 "   usage: scenedetect-cpp  <video_file>\n");
-        return -1;
-    }
+    // TODO allow setting log level via CLI
+    // av_log_set_callback(avlog_do_nothing);
+    // should I just modify the ffmpeg library to do what
+    // I need it to do? Hmm... Well it won't work with the system
+    // version of the library then, unfortunately.
+    av_log_set_callback(av_log_default_callback);
+    // av_log_default_callback();
 
-    char* url = argv[1];
+    // TODO move all this to another function
 
     auto vdec = DecodeContext::open(url);
 
@@ -460,6 +521,7 @@ int main(int argc, char** argv) {
             } else if constexpr (std::is_same_v<T, DecoderCreationError>) {
                 auto error = arg;
 
+                // TODO move all this into its own function
                 if (error.type == DecoderCreationError::AVError) {
                     std::array<char, AV_ERROR_MAX_STRING_SIZE> errbuf{};
                     av_make_error_string(errbuf.data(), errbuf.size(),
@@ -474,7 +536,6 @@ int main(int argc, char** argv) {
                                   "Failed to initialize decoder: %.*s\n",
                                   (int)errmsg.size(), errmsg.data());
                 }
-
             } else {
                 static_assert(always_false_v<T>);
             }

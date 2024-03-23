@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.26)
 
-project(scenedetect)
+project(DiViEn)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_BUILD_TYPE Debug)
@@ -37,8 +37,9 @@ pkg_check_modules(LIBAV REQUIRED IMPORTED_TARGET
     libavutil
 )
 
-add_executable(scenedetect main.cpp decode.cpp)
+add_executable(DiViEn main.cpp decode.cpp)
+# add_executable(DiViEn ff.cpp )
 
-target_compile_options(scenedetect PRIVATE -Wall -Wextra -Wformat -Wno-c99-designator )
-target_link_libraries( scenedetect PkgConfig::LIBAV )
-target_include_directories(scenedetect PRIVATE ./third_party/ffmpeg_build/include)
+target_compile_options(DiViEn PRIVATE -Wall -Wextra -Wformat -Wno-c99-designator )
+target_link_libraries( DiViEn PkgConfig::LIBAV )
+target_include_directories(DiViEn PRIVATE ./third_party/ffmpeg_build/include)

@@ -1,5 +1,11 @@
 # Chunked Encoder
 
+Only supports the latest build of FFmpeg libaries.
+This is due to hacks/workarounds used when dealing with
+libav. It would be a big hassle to support multiple versions.
+
+- Do not use C++ streams (iostream,fstream). They are very slow.
+
 TODO:
     - Add basic tests
     - Add fuzzing
@@ -29,3 +35,5 @@ TODO:
   - Test functions like concatenations that they ACTUALLY produce valid bitstreams.
     Find some stuff for it and do like randomized decoder loop checking. Not just
     check one single time in mpv and it "seems to have worked".
+
+  - make sure windows builds are compiled with clang.

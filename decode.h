@@ -5,13 +5,12 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <memory>
 #include <pthread.h>
+#include <string_view>
 #include <unistd.h>
 #include <variant>
 
 extern "C" {
-
 #include <libavcodec/avcodec.h>
 #include <libavcodec/codec.h>
 #include <libavcodec/packet.h>
@@ -24,10 +23,6 @@ extern "C" {
 #include <libavutil/opt.h>
 #include <libavutil/pixfmt.h>
 #include <libavutil/rational.h>
-}
-
-template <typename T, auto Alloc, auto Free> auto make_resource() {
-    return std::unique_ptr<T, decltype([](T* ptr) { Free(&ptr); })>(Alloc());
 }
 
 struct DecoderCreationError {
@@ -52,18 +47,8 @@ struct DecoderCreationError {
 };
 
 // Returns index of video stream, or -1 if it was not found.
-[[nodiscard]] inline int get_video_stream_index(AVFormatContext* demuxer) {
-    // find stream idx of video stream
-    for (unsigned int stream_idx = 0; stream_idx < demuxer->nb_streams;
-         stream_idx++) {
-        if (demuxer->streams[stream_idx]->codecpar->codec_type ==
-            AVMEDIA_TYPE_VIDEO) {
-            return static_cast<int>(stream_idx);
-        }
-    }
-    // No stream available.
-    return -1;
-}
+// TODO replace this with av_find_best_stream() or whatever it's
+// called.
 
 // maybe add ctrl+C interrupt that just stops and flushes all packets so far?
 
@@ -121,6 +106,8 @@ struct DecodeContext {
         avformat_close_input(&demuxer);
     }
 
+    // TODO maybe put another abstraction of just encapsulating
+    // format context and wrap that one inside here
     DecodeContext(AVFormatContext* demuxer_, AVStream* stream_,
                   AVCodecContext* decoder_, AVPacket* pkt_, FrameBuf frame_)
         : demuxer(demuxer_), stream(stream_), decoder(decoder_), pkt(pkt_),
@@ -187,4 +174,4 @@ struct CountFramesResult {
     unsigned int frame_count : 31;
 };
 
-[[nodiscard]] CountFramesResult count_frames(DecodeContext& dc);
+[[nodiscard]] CountFramesResult count_video_packets(DecodeContext& dc);
