@@ -1,7 +1,11 @@
 cmake_minimum_required(VERSION 3.26)
 
+set(CMAKE_C_COMPILER clang)
+set(CMAKE_CXX_COMPILER clang++)
+
 project(DiViEn)
 
+# set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_BUILD_TYPE Debug)
 set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
@@ -37,7 +41,7 @@ pkg_check_modules(LIBAV REQUIRED IMPORTED_TARGET
     libavutil
 )
 
-add_executable(DiViEn main.cpp decode.cpp)
+add_executable(DiViEn main.cpp decode.cpp segment.cpp)
 # add_executable(DiViEn ff.cpp )
 
 target_compile_options(DiViEn PRIVATE -Wall -Wextra -Wformat -Wno-c99-designator )

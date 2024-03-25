@@ -275,9 +275,9 @@ int worker_thread(unsigned int worker_id, DecodeContext& decoder) {
 // }
 
 // assume same naming convention
-// this is direct concatenation
+// this is direct concatenation, nothing extra done to files.
 // hardcoded. TODO remove.
-void concat_files(unsigned int num_files) {
+void raw_concat_files(unsigned int num_files) {
     std::array<char, 64> buf{};
 
     std::ofstream dst("output.mp4", std::ios::binary);
@@ -388,12 +388,11 @@ void main_encode_loop(DecodeContext& d_ctx) {
 
     // there is no active lock on the mutex since all threads
     // terminated, so global_chunk_id can be safely accessed.
-    concat_files(global_chunk_id);
+    raw_concat_files(global_chunk_id);
 }
 
 // each index tells you the packet offset for that segment
 // for both dts and pts, of course.
-std::vector<size_t> packet_offsets{};
 
 // this code is so incredibly messy bro
 
@@ -401,59 +400,10 @@ std::vector<size_t> packet_offsets{};
 // from max index to 0, that way when a thing happens.
 // we can avoid double counting the segments. oR wait...
 // maybe not.
-void identify_broken_segments(unsigned int num_segments, bool concat_broken) {
-    unsigned int framesum = 0;
-    unsigned int nb_discarded = 0;
-    size_t p_offset = 0;
-    for (unsigned int i = 0; i < num_segments; i++) {
-        // Does not using the {} braces leave this totally
-        // uninitialized?
-        // TODO replace with {fmt}
-        // and don't use iostream anywhere.
-        std::array<char, 128> fpath{};
-        // TODO need to find out if I'm relying on zero initialization
-        // or if snprintf here outputs the null terminator.
-        // TODO remove hard coded values, just operate in current folder for now
-        (void)snprintf(fpath.data(), fpath.size(), "OUTPUT%d.mp4", i);
 
-        // Now I need to write a concatenation function.
-
-        auto vdec = DecodeContext::open(fpath.data());
-        // TODO make sure with all this stuff everything correctly gets
-        // closed and stuff
-        // TODO error handling: access variant properly.
-        auto frames = count_video_packets(std::get<DecodeContext>(vdec));
-        printf("[%d]frames: %d\n", i, frames.frame_count);
-
-        if (frames.nb_discarded != 0) {
-            printf(" INFO index %d, frame counts differ: %d (all packets) - %d "
-                   "(decodable only)\n",
-                   i, frames.frame_count + frames.nb_discarded,
-                   frames.frame_count);
-            nb_discarded += frames.nb_discarded;
-            std::array<char, 64> buf{};
-            // TODO switch to mkv
-            (void)snprintf(buf.data(), buf.size(), "OUTPUT_%d_%d.mp4", i - 1,
-                           i);
-            if (concat_broken) {
-                assert(concat_video(i, buf.data(), packet_offsets) == 0);
-            }
-        }
-
-        // frame count + discarded gives total packet count (guaranteed)
-
-        // packet_counts.
-        if (!concat_broken) {
-            packet_offsets.push_back(p_offset);
-            p_offset += frames.frame_count + frames.nb_discarded;
-        }
-
-        assert(frames.frame_count > 0);
-        framesum += frames.frame_count;
-    }
-    printf("Framesum: %d\nTotal packets: %d\n", framesum,
-           framesum + nb_discarded);
-}
+// basically what we need need to do
+// is build these vectors
+// TODO move this into segment.h
 
 // I think we just need to configure the AVOutputFormat propertly.
 // It seems like if this is null, the output format is guessed
@@ -465,25 +415,24 @@ void identify_broken_segments(unsigned int num_segments, bool concat_broken) {
 // filter or just directly put the packets next to each other.
 // Probably better to use concat filter I guess.
 
+// reasonable estimate for initial allocation amount
+constexpr size_t EST_NB_SEGMENTS = 1100;
+
+// reasonable estimate for packets per segment
+constexpr size_t EST_PKTS_PER_SEG = 140;
+
 int main(int argc, char** argv) {
+    if (signal(SIGSEGV, segvHandler) == SIG_ERR) {
+        w_stderr("signal(): failed to set SIGSEGV signal handler\n");
+    }
 
-    // if (signal(SIGSEGV, segvHandler) == SIG_ERR) {
-    //     w_stderr(
-    //         "signal(): failed to set SIGSEGV signal handler, aborting...\n");
-    //     return -1;
-    // }
+    if (argc != 2) {
+        w_stderr("DiViEn: invalid number of arguments\n"
+                 "   usage: DiViEn  <video_file>\n");
+        return -1;
+    }
 
-    // yeah so I'm pretty sure this works by just passing a fucking text file
-    // into the url or whatever... fucking retarded. But whatever still better
-    // than doing the command line which would be the same shit.
-
-    // if (argc != 2) {
-    //     w_stderr("DiViEn: invalid number of arguments\n"
-    //              "   usage: DiViEn  <video_file>\n");
-    //     return -1;
-    // }
-
-    // char* url = argv[1];
+    const char* url = argv[1];
 
     // I think maybe next step will be cleaning up the code. So that it will be
     // feasible to continue working on this.
@@ -491,21 +440,41 @@ int main(int argc, char** argv) {
     // TODO maybe add option to not copy timestamps.
     // Dang this stuff is complicated.
 
-    const char* url = "/home/yusuf/avdist/test_x265.mp4";
+    // 1432 max index
+
+    // ok so unfortunately it does seem like it's possible to
+    // have totally adjacent segments with broken framecounts.
+    // In which case I believe we need to concatenate longer
+    // segments.
+    // But hopefully it isn't possible that the very first segment
+    // has extra packets.
 
     unsigned int nb_segments = 0;
-    assert(segment_video(url, "OUTPUT%d.mp4", nb_segments) == 0);
+    std::vector<Timestamp> timestamps{};
+    // 250 frames per segment, 1024 segments
+    // more accurate estimate is maybe 120-250. Will depend on video of course.
+    timestamps.reserve(EST_NB_SEGMENTS * EST_PKTS_PER_SEG);
+    // It would be nice to have both vectors somehow be a part of the same
+    // larger allocation.
+    assert(segment_video(url, "OUTPUT%d.mp4", nb_segments, timestamps) == 0);
 
-    identify_broken_segments(30, false);
-    printf("pkt_offsets %d, nb_timestamps %d\n", packet_offsets.size(),
-           dts_timestamps.size());
+    printf("%zu - seg size\n", timestamps.size());
+    // can we avoid doing this twice?
+    // identify_broken_segments(nb_segments, false);
+    // printf("pkt_offsets %d, nb_timestamps %d\n", packet_offsets.size(),
+    //        dts_timestamps.size());
 
-    identify_broken_segments(30, true);
+    std::vector<uint32_t> packet_offsets{};
+    packet_offsets.reserve(EST_NB_SEGMENTS);
+    // LETS GO DUDE. FINALLY IT'S WORKING.
+
+    // identify_broken_segments(nb_segments, false, packet_offsets, timestamps);
+    identify_broken_segments(nb_segments, true, packet_offsets, timestamps);
 
     // perhaps I should check if packets are reordered by the segment muxer.
     // but let me just try direct copying of original dts packets.
 
-    auto vdec2 = DecodeContext::open(url);
+    // auto vdec2 = DecodeContext::open(url);
     // TODO make sure with all this stuff everything correctly gets
     // closed and stuff
     // TODO error handling: access variant properly.

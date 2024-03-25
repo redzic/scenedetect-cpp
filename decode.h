@@ -5,11 +5,11 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <pthread.h>
 #include <string_view>
 #include <unistd.h>
 #include <variant>
-#include <vector>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -26,9 +26,7 @@ extern "C" {
 #include <libavutil/rational.h>
 }
 
-extern std::vector<int64_t> dts_timestamps;
-extern std::vector<int64_t> pts_timestamps;
-
+// TODO possibly rename this for generalized libavcodec errors
 struct DecoderCreationError {
     enum DCErrorType : uint8_t {
         AllocationFailure,
@@ -63,13 +61,41 @@ constexpr size_t THREADS_PER_WORKER = 2;
 constexpr size_t framebuf_size = CHUNK_FRAME_SIZE * NUM_WORKERS;
 using FrameBuf = std::array<AVFrame*, framebuf_size>;
 
+// yeah so even if you override the destructor, the other destructors
+// still run afterward which is good.
+struct DemuxerContext {
+    // TODO does overriding the destructor make other destructors not run?
+
+    // is there a faster way to delete this constructors?
+    DemuxerContext() = delete;
+    DemuxerContext(DemuxerContext&& source) = delete;
+    DemuxerContext(DemuxerContext&) = delete;
+    DemuxerContext& operator=(const DemuxerContext&) = delete;
+    DemuxerContext& operator=(const DemuxerContext&&) = delete;
+
+    // TODO make sure this has no overhead
+    std::unique_ptr<AVFormatContext, decltype([](AVFormatContext* ptr) {
+                        avformat_close_input(&ptr);
+                    })>
+        demuxer;
+    std::unique_ptr<AVPacket,
+                    decltype([](AVPacket* ptr) { av_packet_free(&ptr); })>
+        pkt;
+
+    ~DemuxerContext() = default;
+};
+
 struct DecodeContext {
     // these fields can be null
     AVFormatContext* demuxer{nullptr};
+    AVPacket* pkt{nullptr};
+
+    // video stream
+    // TODO do we really need to store this?
+    // TODO see what happens if we delete this
     AVStream* stream{nullptr};
     AVCodecContext* decoder{nullptr};
 
-    AVPacket* pkt{nullptr};
     FrameBuf framebuf{};
 
     // -1 if not initialized; else the index of the video stream
@@ -114,7 +140,7 @@ struct DecodeContext {
     // format context and wrap that one inside here
     DecodeContext(AVFormatContext* demuxer_, AVStream* stream_,
                   AVCodecContext* decoder_, AVPacket* pkt_, FrameBuf frame_)
-        : demuxer(demuxer_), stream(stream_), decoder(decoder_), pkt(pkt_),
+        : demuxer(demuxer_), pkt(pkt_), stream(stream_), decoder(decoder_),
           framebuf(frame_) {}
 
     // Open file and initialize video decoder.

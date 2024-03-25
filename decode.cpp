@@ -7,9 +7,6 @@
 
 #include <cassert>
 
-std::vector<int64_t> dts_timestamps{};
-std::vector<int64_t> pts_timestamps{};
-
 std::variant<DecodeContext, DecoderCreationError>
 DecodeContext::open(const char* url) {
     auto pkt = make_resource<AVPacket, av_packet_alloc, av_packet_free>();
@@ -119,6 +116,7 @@ int run_decoder(DecodeContext& dc, size_t framebuf_offset, size_t max_frames) {
 
     assert(max_frames > 0);
     assert(max_frames <= dc.framebuf.size());
+    // TODO I think the second part of this bounds check is redundant.
     if ((framebuf_offset + max_frames - 1) >= dc.framebuf.size() ||
         framebuf_offset >= dc.framebuf.size()) [[unlikely]] {
         // bounds check failed
@@ -160,7 +158,6 @@ int run_decoder(DecodeContext& dc, size_t framebuf_offset, size_t max_frames) {
             return (int)output_index;
         } else if (ret < 0 && ret != AVERROR(EAGAIN)) [[unlikely]] {
             return ret;
-        } else [[likely]] {
         }
 
         // Get packet (compressed data) from demuxer
@@ -197,7 +194,6 @@ int run_decoder(DecodeContext& dc, size_t framebuf_offset, size_t max_frames) {
             return (int)output_index;
         } else if (ret < 0 && ret != AVERROR(EAGAIN)) [[unlikely]] {
             return ret;
-        } else [[likely]] {
         }
 
         if (output_index >= max_frames) [[unlikely]] {
@@ -228,31 +224,28 @@ int run_decoder(DecodeContext& dc, size_t framebuf_offset, size_t max_frames) {
 
 // by counting packets
 CountFramesResult count_video_packets(DecodeContext& dc) {
-    // probably a bunch of memory leaks in here but whatever
-    int stream_idx =
+    // TODO fix memory leaks
+
+    // TODO cache this/use cached value.
+    auto stream_idx =
         av_find_best_stream(dc.demuxer, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
 
     assert(stream_idx >= 0);
 
-    AVPacket* pkt = av_packet_alloc();
-    assert(pkt != nullptr);
+    assert(dc.pkt != nullptr);
 
     unsigned int pkt_count = 0;
     unsigned int nb_discarded = 0;
     // TODO error handling
-    while (av_read_frame(dc.demuxer, pkt) == 0) {
-        if (pkt->stream_index != stream_idx) {
+    while (av_read_frame(dc.demuxer, dc.pkt) == 0) {
+        if (dc.pkt->stream_index != stream_idx) {
             continue;
         }
-        if ((pkt->flags & AV_PKT_FLAG_DISCARD) != 0) {
+        if ((dc.pkt->flags & AV_PKT_FLAG_DISCARD) != 0) {
             nb_discarded++;
         } else {
             pkt_count++;
         }
-        dts_timestamps.push_back(pkt->dts);
-        pts_timestamps.push_back(pkt->pts);
-        // TODO remove
-        // printf("Pkt dts: %ld\n", pkt->dts);
     }
 
     return CountFramesResult{

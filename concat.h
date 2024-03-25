@@ -2,9 +2,11 @@
 
 #include "decode.h"
 #include "resource.h"
+#include "segment.h"
 
 #include <cassert>
 #include <cstdio>
+#include <vector>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -30,12 +32,21 @@ extern "C" {
 // copied from the video.
 
 // or perhaps these should be string_views
-// int concat_video(const char* f1, const char* f2) {
 // concats i-1 and i
-[[nodiscard]] inline int
-concat_video(unsigned int i, const char* out_filename,
-             const std::vector<size_t>& packet_offsets) {
-    assert(i >= 1);
+// TODO take span as argument not vector reference
+
+// I believe all this code originally came from
+// the remux example in ffmpeg.
+// TODO also deduplicate packet copying loop.
+
+// [[nodiscard]] inline int concat_video(unsigned int i, const char*
+// out_filename,
+// range is inclusive
+[[nodiscard]] inline int concat_video(unsigned int start_i, unsigned int end_i,
+                                      const char* out_filename,
+                                      SegmentingData seg_data) {
+
+    assert(end_i > start_i);
 
     int ret = 0;
     auto pkt = make_resource<AVPacket, av_packet_alloc, av_packet_free>();
@@ -58,22 +69,14 @@ concat_video(unsigned int i, const char* out_filename,
     const auto* concat = av_find_input_format("concat");
     assert(concat != nullptr);
 
-    // ideally there would be a version of fopen that relies on flags or
-    // something to do this instead of this BS string passing mechanism.
-    // Is it possible to create my own standard library?
-    // I mean, for this project, probably not. Because ffmpeg relies on it.
-    // BUT, there's nothing stopping me from creating my own versions
-    // of these functions.
-    // notice we don't use append mode here
-    FILE* concat_file = fopen("concat.txt", "wb");
-
-    // (void)fprintf(concat_file, "file '%s'\n", f1);
-    // (void)fprintf(concat_file, "file '%s'\n", f2);
-    (void)fprintf(concat_file, "file 'OUTPUT%d.mp4'\n", i - 1);
-    (void)fprintf(concat_file, "file 'OUTPUT%d.mp4'\n", i);
-
-    fclose(concat_file);
-    // should we delete the file?
+    {
+        std::unique_ptr<FILE, decltype(&fclose)> concat_file(
+            fopen("concat.txt", "wb"), fclose);
+        assert(concat_file != nullptr);
+        for (auto i = start_i; i <= end_i; i++) {
+            assert(fprintf(concat_file.get(), "file 'OUTPUT%d.mp4'\n", i) > 0);
+        }
+    }
 
     {
 
@@ -92,18 +95,12 @@ concat_video(unsigned int i, const char* out_filename,
 
     avformat_find_stream_info(ifmt_ctx.get(), nullptr);
 
-    int video_idx = av_find_best_stream(ifmt_ctx.get(), AVMEDIA_TYPE_VIDEO, -1,
-                                        -1, nullptr, 0);
+    auto video_idx = av_find_best_stream(ifmt_ctx.get(), AVMEDIA_TYPE_VIDEO, -1,
+                                         -1, nullptr, 0);
 
     if (video_idx < 0) {
         return -1;
     }
-
-    // create output format context
-
-    // now I believe we can read packets and put them all in an output stream.
-
-    // index is stored in AVStream->index
 
     const AVOutputFormat* ofmt = nullptr;
 
@@ -111,9 +108,7 @@ concat_video(unsigned int i, const char* out_filename,
     avformat_alloc_output_context2(&ofmt_ctx, nullptr, nullptr, out_filename);
     if (ofmt_ctx == nullptr) {
         fprintf(stderr, "Could not create output context\n");
-        ret = AVERROR_UNKNOWN;
-        return ret;
-        // goto end;
+        return AVERROR_UNKNOWN;
     }
 
     ofmt = ofmt_ctx->oformat;
@@ -130,10 +125,7 @@ concat_video(unsigned int i, const char* out_filename,
         auto* out_stream = avformat_new_stream(ofmt_ctx, nullptr);
         if (out_stream == nullptr) {
             fprintf(stderr, "Failed allocating output stream\n");
-            ret = AVERROR_UNKNOWN;
-            // goto end;
-            // TODO fix memory leak
-            return ret;
+            return AVERROR_UNKNOWN;
         }
 
         ret = avcodec_parameters_copy(out_stream->codecpar, in_codecpar);
@@ -145,7 +137,6 @@ concat_video(unsigned int i, const char* out_filename,
         }
         out_stream->codecpar->codec_tag = 0;
     }
-    // av_dump_format(ofmt_ctx, 0, out_filename, 1);
 
     if ((ofmt->flags & AVFMT_NOFILE) == 0) {
         ret = avio_open(&ofmt_ctx->pb, out_filename, AVIO_FLAG_WRITE);
@@ -166,41 +157,33 @@ concat_video(unsigned int i, const char* out_filename,
 
     while (true) {
         // TODO rename demuxer
+        // so usually the timestamps that av_seek_frame takes it pts,
+        // but apparently some demuxers seek on dts. Not good.
+        // Looks like we will have to manually seek ourselves.
         ret = av_read_frame(ifmt_ctx.get(), pkt.get());
         if (ret < 0) {
             break;
         }
 
-        auto* in_stream = ifmt_ctx->streams[pkt->stream_index];
+        // auto* in_stream = ifmt_ctx->streams[pkt->stream_index];
         if (pkt->stream_index != video_idx) {
+            // TODO determine when we actually need to unref the packet.
             av_packet_unref(pkt.get());
             continue;
         }
 
-        auto* out_stream = ofmt_ctx->streams[pkt->stream_index];
+        // auto* out_stream = ofmt_ctx->streams[pkt->stream_index];
 
-        /* copy packet */
-        // av_packet_rescale_ts(pkt.get(), in_stream->time_base,
-        //                      out_stream->time_base);
-        // printf("pkt dts: %d (> last dts? %d)\n", (int)pkt->dts,
-        //        (int)(pkt->dts > last_dts));
-        //    chat we might have to do direct copy of timestamps and stuff
-
-        // also we might wanna see if it's possible to check for re ordering of
-        // timestamps
-
-        // last_dts = pkt->dts;
-        // last_dts = pkt->pts;
-        // pkt->dts = AV_NOPTS_VALUE;
-
-        // ok so manually doing this actually does fix the issue of
-        // timestamps. We should probably double check that segment
-        // puts packets in the same order they come tho.
-
-        // also holy shit this code needs to be massively cleaned up.
-
-        pkt->dts = dts_timestamps[packet_offsets[i - 1] + (pkt_index)];
-        pkt->pts = pts_timestamps[packet_offsets[i - 1] + (pkt_index++)];
+        // TODO should probably add bounds check here
+        // Copy timestamps from ORIGINAL
+        auto ts =
+            seg_data.timestamps[seg_data.packet_offsets[start_i] + pkt_index++];
+        // .timestamps[seg_data.packet_offsets[start_i - 1] + pkt_index++];
+        // TODO use .at() in spam (C++23)
+        // auto ts = seg_data.timestamps.at(seg_data.packet_offsets.at(i - 1) +
+        //                                  pkt_index++);
+        pkt->dts = ts.dts;
+        pkt->pts = ts.pts;
         pkt->pos = -1;
 
         ret = av_interleaved_write_frame(ofmt_ctx, pkt.get());
