@@ -90,16 +90,12 @@ struct DecodeContext {
     AVFormatContext* demuxer{nullptr};
     AVPacket* pkt{nullptr};
 
-    // video stream
-    // TODO do we really need to store this?
-    // TODO see what happens if we delete this
-    AVStream* stream{nullptr};
     AVCodecContext* decoder{nullptr};
 
     FrameBuf framebuf{};
 
     // -1 if not initialized; else the index of the video stream
-    int video_stream_index = -1;
+    int video_index = -1;
 
     // gets the index of the video stream.
     // Populates it if not available.
@@ -132,16 +128,16 @@ struct DecodeContext {
         }
 
         av_packet_free(&pkt);
-        avcodec_free_context(&decoder);
         avformat_close_input(&demuxer);
+        avcodec_free_context(&decoder);
     }
 
     // TODO maybe put another abstraction of just encapsulating
     // format context and wrap that one inside here
-    DecodeContext(AVFormatContext* demuxer_, AVStream* stream_,
-                  AVCodecContext* decoder_, AVPacket* pkt_, FrameBuf frame_)
-        : demuxer(demuxer_), pkt(pkt_), stream(stream_), decoder(decoder_),
-          framebuf(frame_) {}
+    DecodeContext(AVFormatContext* demuxer_, AVCodecContext* decoder_,
+                  AVPacket* pkt_, FrameBuf frame_, int vindex)
+        : demuxer(demuxer_), pkt(pkt_), decoder(decoder_), framebuf(frame_),
+          video_index(vindex) {}
 
     // Open file and initialize video decoder.
     [[nodiscard]] static std::variant<DecodeContext, DecoderCreationError>

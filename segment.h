@@ -52,6 +52,6 @@ struct SegmentingData {
                                 unsigned int& nb_segments,
                                 std::vector<Timestamp>& timestamps);
 
-void identify_broken_segments(unsigned int num_segments, bool concat_broken,
-                              std::vector<uint32_t>& packet_offsets,
-                              std::span<Timestamp> timestamps);
+void fix_broken_segments(unsigned int num_segments,
+                         std::vector<uint32_t>& packet_offsets,
+                         std::span<Timestamp> timestamps);

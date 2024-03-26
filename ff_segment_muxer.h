@@ -11,7 +11,6 @@ extern "C" {
 #include "libavformat/avformat.h"
 #include <stdint.h>
 
-// how can we get this data without manually copying and pasting this...
 typedef struct SegmentListEntry {
     int index;
     double start_time, end_time;
@@ -32,8 +31,9 @@ typedef enum {
     LIST_TYPE_NB,
 } ListType;
 
-// [SERIOUS] MAKE SURE THIS IS IN SYNC WITH INTERNAL FFMPEG CODE.
-// THE CODE WILL NOT WORK OTHERWISE.
+#define SEGMENT_LIST_FLAG_CACHE 1
+#define SEGMENT_LIST_FLAG_LIVE 2
+
 typedef struct SegmentContext {
     const AVClass* class_; /**< Class for private options. */
     int segment_idx; ///< index of the segment file to write, starting from 0

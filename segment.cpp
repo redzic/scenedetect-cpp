@@ -23,38 +23,33 @@
 // if we just dump packets based on keyframes. Could maybe look into that
 // in the future
 
-void identify_broken_segments(unsigned int num_segments, bool concat_broken,
-                              std::vector<uint32_t>& packet_offsets,
-                              std::span<Timestamp> timestamps) {
+void fix_broken_segments(unsigned int num_segments,
+                         std::vector<uint32_t>& packet_offsets,
+                         std::span<Timestamp> timestamps) {
 
-    auto concat_files = [concat_broken, &packet_offsets,
-                         timestamps](unsigned int low, unsigned int high) {
-        if (concat_broken) {
-            std::array<char, 64> buf{};
-            // TODO switch to mkv
-            (void)snprintf(buf.data(), buf.size(), "OUTPUT_%d_%d.mp4", low,
-                           high);
-            auto sd = SegmentingData(packet_offsets, timestamps);
-            assert(concat_video(low, high, buf.data(), sd) == 0);
+    auto concat_files = [&packet_offsets, timestamps](unsigned int low,
+                                                      unsigned int high) {
+        std::array<char, 64> buf{};
+        // TODO switch to mkv
+        (void)snprintf(buf.data(), buf.size(), "OUTPUT_%d_%d.mp4", low, high);
+        auto sd = SegmentingData(packet_offsets, timestamps);
+        DvAssert(concat_segments(low, high, buf.data(), sd) == 0);
 
-            auto dc = DecodeContext::open(buf.data());
-            // print out stuff
-            auto res = count_video_packets(std::get<DecodeContext>(dc));
-            printf("  CAT[%d, %d] : %d pkts (%d decodable)\n", low, high,
-                   res.frame_count + res.nb_discarded, res.frame_count);
+        // TODO put this in a demuxer class instead.
+        auto dc = DecodeContext::open(buf.data());
+        // TODO remove this call because it is just a sanity check. Or add
+        // option to check that is not on by default.
+        auto res = count_video_packets(std::get<DecodeContext>(dc));
+        printf("  CAT[%d, %d] : %d pkts (%d decodable)\n", low, high,
+               res.frame_count + res.nb_discarded, res.frame_count);
 
-            assert(res.nb_discarded == 0);
-            if (res.nb_discarded == 0) {
-                printf(" No discarded frames :)\n");
-            } else {
-                printf(" NOT GOOD: [DISCARDED FRAMES]: %d\n", res.nb_discarded);
-            }
-        }
+        DvAssert(res.nb_discarded == 0);
     };
 
     unsigned int framesum = 0;
     unsigned int nb_discarded = 0;
     uint32_t p_offset = 0;
+    // index of last packet with
     unsigned int last_working = 0;
     for (unsigned int i = 0; i < num_segments; i++) {
         // Does not using the {} braces leave this totally
@@ -79,30 +74,23 @@ void identify_broken_segments(unsigned int num_segments, bool concat_broken,
         auto frames = count_video_packets(std::get<DecodeContext>(vdec));
         printf("[%d]frames: %d\n", i, frames.frame_count);
 
-        // if (!concat_broken) {
         packet_offsets.push_back(p_offset);
         p_offset += frames.frame_count + frames.nb_discarded;
-        // }
 
-        // assert ()
-        // we need to concatenate bacwkards
-        if (i == 0) {
-            assert(frames.nb_discarded == 0);
+        if (i == 0) [[unlikely]] {
+            DvAssert(frames.nb_discarded == 0);
         }
         // Ideally we should manually split up the loop with lambdas and such.
+        // But realistically it doesn't actually matter.
 
         // Concats are using inclusive range.
 
-        // working
-        // TODO clean up
-        if (frames.nb_discarded == 0) {
-            if (i != 0 && last_working != (i - 1)) {
+        if (frames.nb_discarded == 0) [[likely]] {
+            if (i != 0 && last_working != (i - 1)) [[unlikely]] {
                 printf("  CONCAT NEEDED: [%d, %d]\n", last_working, i - 1);
                 concat_files(last_working, i - 1);
             }
             last_working = i;
-        } else {
-            // broken segment, don't update last_working
         }
 
         // check last iteration, otherwise it doesn't get handled
@@ -123,7 +111,7 @@ void identify_broken_segments(unsigned int num_segments, bool concat_broken,
 
         // frame count + discarded gives total packet count (guaranteed)
 
-        assert(frames.frame_count > 0);
+        DvAssert(frames.frame_count > 0);
         framesum += frames.frame_count;
     }
 
@@ -186,7 +174,7 @@ int segment_video(const char* in_filename, const char* out_filename,
 
     video_idx = av_find_best_stream(ifmt_ctx.get(), AVMEDIA_TYPE_VIDEO, -1, -1,
                                     nullptr, 0);
-    assert(video_idx >= 0);
+    DvAssert(video_idx >= 0);
 
     ofmt = ofmt_ctx->oformat;
     // TODO all of this should be deduplicated between segment and concat code
@@ -195,7 +183,7 @@ int segment_video(const char* in_filename, const char* out_filename,
         auto* in_stream = ifmt_ctx->streams[video_idx];
         AVCodecParameters* in_codecpar = in_stream->codecpar;
 
-        assert(in_codecpar->codec_type == AVMEDIA_TYPE_VIDEO);
+        DvAssert(in_codecpar->codec_type == AVMEDIA_TYPE_VIDEO);
 
         auto* out_stream = avformat_new_stream(ofmt_ctx, nullptr);
         if (out_stream == nullptr) {
@@ -245,7 +233,6 @@ int segment_video(const char* in_filename, const char* out_filename,
             continue;
         }
 
-        // emplace back + some constructor defined for timestamps?
         timestamps.emplace_back(pkt->dts, pkt->pts);
 
         /* copy packet */
@@ -261,6 +248,7 @@ int segment_video(const char* in_filename, const char* out_filename,
             fprintf(stderr, "Error muxing packet\n");
             break;
         }
+        av_packet_unref(pkt.get());
     }
 
     // so I believe it's not possible for this here to be

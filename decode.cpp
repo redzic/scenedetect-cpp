@@ -5,8 +5,6 @@
 #include "libavutil/avutil.h"
 #include "resource.h"
 
-#include <cassert>
-
 std::variant<DecodeContext, DecoderCreationError>
 DecodeContext::open(const char* url) {
     auto pkt = make_resource<AVPacket, av_packet_alloc, av_packet_free>();
@@ -32,27 +30,21 @@ DecodeContext::open(const char* url) {
         }
     }
 
-    AVFormatContext* raw_demuxer = nullptr;
-
-    // so I think for this  we just do the same thing but just
-
     // avformat_open_input automatically frees on failure so we construct
     // the smart pointer AFTER this expression.
-    {
-        int ret = avformat_open_input(&raw_demuxer, url, nullptr, nullptr);
-        if (ret < 0) {
-            return {DecoderCreationError{.type = DecoderCreationError::AVError,
-                                         .averror = ret}};
-        }
+    AVFormatContext* raw_demuxer = nullptr;
+    int ret = avformat_open_input(&raw_demuxer, url, nullptr, nullptr);
+    if (ret < 0) {
+        return {DecoderCreationError{.type = DecoderCreationError::AVError,
+                                     .averror = ret}};
     }
-
-    assert(raw_demuxer != nullptr);
+    DvAssert(raw_demuxer != nullptr);
     auto demuxer =
         std::unique_ptr<AVFormatContext, decltype([](AVFormatContext* ctx) {
                             avformat_close_input(&ctx);
                         })>(raw_demuxer);
 
-    avformat_find_stream_info(demuxer.get(), nullptr);
+    // DvAssert(avformat_find_stream_info(demuxer.get(), nullptr) >= 0);
 
     int stream_idx = av_find_best_stream(demuxer.get(), AVMEDIA_TYPE_VIDEO, -1,
                                          -1, nullptr, 0);
@@ -95,7 +87,7 @@ DecodeContext::open(const char* url) {
     // AVCodecContext allocated with alloc context
     // previously was allocated with non-NULL codec,
     // so we can pass NULL here.
-    int ret = avcodec_open2(decoder.get(), nullptr, nullptr);
+    ret = avcodec_open2(decoder.get(), nullptr, nullptr);
     if (ret < 0) [[unlikely]] {
         return {DecoderCreationError{.type = DecoderCreationError::AVError,
                                      .averror = ret}};
@@ -104,18 +96,18 @@ DecodeContext::open(const char* url) {
     return std::variant<DecodeContext, DecoderCreationError>{
         std::in_place_type<DecodeContext>,
         demuxer.release(),
-        stream,
         decoder.release(),
         pkt.release(),
-        frame_buffer};
+        frame_buffer,
+        stream_idx};
 }
 
 int run_decoder(DecodeContext& dc, size_t framebuf_offset, size_t max_frames) {
     // TODO could possibly add a check/method in DecodeContext to ensure
     // it's initialized fully before use.
 
-    assert(max_frames > 0);
-    assert(max_frames <= dc.framebuf.size());
+    DvAssert(max_frames > 0);
+    DvAssert(max_frames <= dc.framebuf.size());
     // TODO I think the second part of this bounds check is redundant.
     if ((framebuf_offset + max_frames - 1) >= dc.framebuf.size() ||
         framebuf_offset >= dc.framebuf.size()) [[unlikely]] {
@@ -168,7 +160,7 @@ int run_decoder(DecodeContext& dc, size_t framebuf_offset, size_t max_frames) {
         }
 
         // skip packets other than the ones we're interested in
-        if (dc.pkt->stream_index != dc.stream->index) [[unlikely]] {
+        if (dc.pkt->stream_index != dc.video_index) [[unlikely]] {
             av_packet_unref(dc.pkt);
             continue;
         }
@@ -227,18 +219,15 @@ CountFramesResult count_video_packets(DecodeContext& dc) {
     // TODO fix memory leaks
 
     // TODO cache this/use cached value.
-    auto stream_idx =
-        av_find_best_stream(dc.demuxer, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
 
-    assert(stream_idx >= 0);
-
-    assert(dc.pkt != nullptr);
+    DvAssert(dc.pkt != nullptr);
 
     unsigned int pkt_count = 0;
     unsigned int nb_discarded = 0;
     // TODO error handling
     while (av_read_frame(dc.demuxer, dc.pkt) == 0) {
-        if (dc.pkt->stream_index != stream_idx) {
+        if (dc.pkt->stream_index != dc.video_index) {
+            av_packet_unref(dc.pkt);
             continue;
         }
         if ((dc.pkt->flags & AV_PKT_FLAG_DISCARD) != 0) {
@@ -246,6 +235,9 @@ CountFramesResult count_video_packets(DecodeContext& dc) {
         } else {
             pkt_count++;
         }
+        // So it was really just this huh...
+        // "packet MUST be unreffed when no longer needed"
+        av_packet_unref(dc.pkt);
     }
 
     return CountFramesResult{

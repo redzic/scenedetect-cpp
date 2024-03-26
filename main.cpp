@@ -19,6 +19,7 @@
 
 #include "concat.h"
 #include "decode.h"
+#include "resource.h"
 #include "segment.h"
 
 extern "C" {
@@ -146,14 +147,14 @@ AVPixelFormat av_pix_fmt_supported_version(AVPixelFormat pix_fmt) {
 
 int encode_frames(const char* file_name, AVFrame* frame_buffer[],
                   size_t frame_count) {
-    assert(frame_count >= 1);
+    DvAssert(frame_count >= 1);
 
     const auto* codec = avcodec_find_encoder_by_name("libaom-av1");
     // so avcodeccontext is used for both encoding and decoding...
     auto* avcc = avcodec_alloc_context3(codec);
     avcc->thread_count = THREADS_PER_WORKER;
 
-    // assert(avcc);
+    // DvAssert(avcc);
     if (avcc == nullptr) {
         w_stderr("failed to allocate encoder context\n");
         return -1;
@@ -421,17 +422,20 @@ constexpr size_t EST_NB_SEGMENTS = 1100;
 // reasonable estimate for packets per segment
 constexpr size_t EST_PKTS_PER_SEG = 140;
 
-int main(int argc, char** argv) {
+// BE CAREFUL NOT TO WRITE ASSERTS
+// WITH SIDE EFFECTS.
+
+int main(int argc, char* argv[]) {
     if (signal(SIGSEGV, segvHandler) == SIG_ERR) {
         w_stderr("signal(): failed to set SIGSEGV signal handler\n");
     }
 
+    // const char* url = "/home/yusuf/avdist/test_x265.mp4";
     if (argc != 2) {
         w_stderr("DiViEn: invalid number of arguments\n"
                  "   usage: DiViEn  <video_file>\n");
         return -1;
     }
-
     const char* url = argv[1];
 
     // I think maybe next step will be cleaning up the code. So that it will be
@@ -456,33 +460,22 @@ int main(int argc, char** argv) {
     timestamps.reserve(EST_NB_SEGMENTS * EST_PKTS_PER_SEG);
     // It would be nice to have both vectors somehow be a part of the same
     // larger allocation.
-    assert(segment_video(url, "OUTPUT%d.mp4", nb_segments, timestamps) == 0);
+    // BRUH...
+    DvAssert(segment_video(url, "OUTPUT%d.mp4", nb_segments, timestamps) == 0);
 
     printf("%zu - seg size\n", timestamps.size());
-    // can we avoid doing this twice?
-    // identify_broken_segments(nb_segments, false);
-    // printf("pkt_offsets %d, nb_timestamps %d\n", packet_offsets.size(),
-    //        dts_timestamps.size());
 
     std::vector<uint32_t> packet_offsets{};
     packet_offsets.reserve(EST_NB_SEGMENTS);
     // LETS GO DUDE. FINALLY IT'S WORKING.
 
-    // identify_broken_segments(nb_segments, false, packet_offsets, timestamps);
-    identify_broken_segments(nb_segments, true, packet_offsets, timestamps);
+    // TODO: remove extra debugging checks for frames,
+    // or make it optional or something (eventually).
 
-    // perhaps I should check if packets are reordered by the segment muxer.
-    // but let me just try direct copying of original dts packets.
-
-    // auto vdec2 = DecodeContext::open(url);
-    // TODO make sure with all this stuff everything correctly gets
-    // closed and stuff
-    // TODO error handling: access variant properly.
-    // auto frames = count_video_packets(std::get<DecodeContext>(vdec2));
+    fix_broken_segments(nb_segments, packet_offsets, timestamps);
 
     return 0;
 
-    // av_log_set_callback(av_log_TEST_CALLBACK);
     // av_log_set_level(AV_LOG_VERBOSE);
 
     // segment_video("/home/yusuf/avdist/test_x265.mp4", "OUTPUT%d.mp4");
@@ -517,6 +510,7 @@ int main(int argc, char** argv) {
 
     auto vdec = DecodeContext::open(url);
 
+    // TODO use std::expected instead?
     std::visit(
         [](auto&& arg) {
             using T = std::decay_t<decltype(arg)>;
@@ -527,7 +521,7 @@ int main(int argc, char** argv) {
                 // int frames = decode_loop(arg);
                 // printf("decoded %d frames\n", frames);
 
-                // assert(run_decoder(arg, 0, 60) == 60);
+                // DvAssert(run_decoder(arg, 0, 60) == 60);
                 // printf("initial decode of 60 frames succeeded\n");
 
             } else if constexpr (std::is_same_v<T, DecoderCreationError>) {

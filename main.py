@@ -131,6 +131,7 @@ hsh = cv2.img_hash.BlockMeanHash_create()
 
 # if as_list=True, this function will return
 # list of hashes for frames of the video
+# Prints hashes for each frame.
 def compute_frame_hashes(path, as_list=False):
     cap = cv2.VideoCapture(path)
 
@@ -228,6 +229,42 @@ def compare_videos(video_path1, video_path2):
     return True
 
 
+# TODO clean up this script so that we can automatically
+# detect stuff
+
+
+def f7(seq):
+    seen = set()
+    seen_add = seen.add
+    return [x for x in seq if not (x in seen or seen_add(x))]
+
+
+files = []
+for i in range(1432 + 1):
+    files.append(f"OUTPUT{i}.mp4")
+
+
+with open("../fixes.txt") as f:
+    # s = f.read()
+    for line in f:
+        line = line.strip()
+        # print(f"orig: {line}")
+        nums = line[len("OUTPUT_") :][:-4].split("_")
+
+        # print(nums.split("_"))
+        low = int(nums[0])
+        high = int(nums[1])
+        for i in range(low, high + 1):
+            files[i] = line
+
+files = f7(files)
+
+# print(files)
+for file in files:
+    compute_frame_hashes(file)
+    # print(file)
+
+
 # TODO maybe find a way to copy range of timestamps from
 # ORIGINAL video. Idk.
 
@@ -238,7 +275,7 @@ def compare_videos(video_path1, video_path2):
 # MAX_INDEX = 29
 # NUM_SEG = MAX_INDEX + 1
 
-compute_frame_hashes("./build/out_divien.mp4")
+# compute_frame_hashes("./build/out_divien.mp4")
 # compute_frame_hashes("./build/out.mp4")
 # compute_frame_hashes("/home/yusuf/avdist/test_x265.mp4")
 
