@@ -45,7 +45,7 @@ namespace {
 
 #define AlwaysInline __attribute__((always_inline)) inline
 
-AlwaysInline void w_stderr(std::string_view sv) {
+AlwaysInline void w_err(std::string_view sv) {
     write(STDERR_FILENO, sv.data(), sv.size());
 }
 
@@ -53,8 +53,7 @@ AlwaysInline void w_stderr(std::string_view sv) {
 // unref before you reuse AVPacket or AVFrame
 
 void segvHandler(int /*unused*/) {
-    w_stderr(
-        "Segmentation fault occurred. Please file a bug report on GitHub.\n");
+    w_err("Segmentation fault occurred. Please file a bug report on GitHub.\n");
     exit(EXIT_FAILURE); // NOLINT
 }
 
@@ -156,7 +155,7 @@ int encode_frames(const char* file_name, AVFrame* frame_buffer[],
 
     // DvAssert(avcc);
     if (avcc == nullptr) {
-        w_stderr("failed to allocate encoder context\n");
+        w_err("failed to allocate encoder context\n");
         return -1;
     }
 
@@ -183,7 +182,7 @@ int encode_frames(const char* file_name, AVFrame* frame_buffer[],
 
     int ret = avcodec_open2(avcc, codec, nullptr);
     if (ret < 0) {
-        w_stderr("failed to open codec\n");
+        w_err("failed to open codec\n");
         return ret;
     }
 
@@ -425,21 +424,179 @@ constexpr size_t EST_PKTS_PER_SEG = 140;
 // BE CAREFUL NOT TO WRITE ASSERTS
 // WITH SIDE EFFECTS.
 
+// so now that we got the segmenting code working I guess it's time to
+// write up the TCP server and client.
+
+// TODO We should add a test for this, and measure "decoder stalling".
+// There's also a problem of what if we need really long segments plus short
+// segments. Then our current model of using one global decoder isn't so good,
+// also because we would have to allocate the entire chunk ahead of time.
+// which would be a huge memory problem obviously. It works ok with fixed sized
+// chunks though.
+
+// I think there's a solution to fix the memory hogging problem,
+// but it would still require having the decoder available.
+//      (the fix is to decode n frames at a time and cycling
+//      between encoder and decoder instead of full decode + Encode step.)
+
+// so unique_ptr DOES seem to be "zero cost" if you use make_unique.
+// in certain cases at least. and noexcept.
+
+// TODO: if I REALLY wanna make this code complex,
+// I could implement some kind of way to decode packets
+// as they are coming in instead of waiting for the entire chunk to
+// be received first.
+
+// also I should check for if
+
+// https://github.com/facebook/wdt
+// perhaps we should consider this.
+
+// Perhaps we should just use one global reader, to minimize latency.
+// But hmm, perhaps that's not the best approach either, because one client
+// may not have the best data connection speed.
+// The best approach would be rather complex.
+// We should at least be maxing out our bandwidth.
+
+// we could also possibly look into using bittorrent.
+
+#include <asio.hpp>
+#include <asio/co_spawn.hpp>
+#include <asio/detached.hpp>
+#include <asio/io_context.hpp>
+#include <asio/ip/tcp.hpp>
+#include <asio/signal_set.hpp>
+#include <asio/write.hpp>
+#include <cstdio>
+#include <iostream>
+
+using asio::awaitable;
+using asio::co_spawn;
+using asio::detached;
+using asio::use_awaitable;
+using asio::ip::tcp;
+namespace this_coro = asio::this_coro;
+
+#if defined(ASIO_ENABLE_HANDLER_TRACKING)
+#define use_awaitable                                                          \
+    asio::use_awaitable_t(__FILE__, __LINE__, __PRETTY_FUNCTION__)
+#endif
+
+awaitable<void> echo(tcp::socket socket) {
+    try {
+        char data[1024];
+        for (;;) {
+            std::size_t n = co_await socket.async_read_some(asio::buffer(data),
+                                                            use_awaitable);
+            co_await async_write(socket, asio::buffer(data, n), use_awaitable);
+        }
+    } catch (std::exception& e) {
+        // I guess this is ok since it should be "TRULY" exceptional.
+        printf("echo Exception: %s\n", e.what());
+    }
+}
+
+awaitable<void> listener() {
+    auto executor = co_await this_coro::executor;
+    tcp::acceptor acceptor(executor, {tcp::v4(), 55555});
+    for (;;) {
+        tcp::socket socket = co_await acceptor.async_accept(use_awaitable);
+        co_spawn(executor, echo(std::move(socket)), detached);
+    }
+}
+
+// TODO.
+// perhaps we could avoid the overhead of redundantly reading from files.
+// By just storing the compressed data in memory.
+
 int main(int argc, char* argv[]) {
-    if (signal(SIGSEGV, segvHandler) == SIG_ERR) {
-        w_stderr("signal(): failed to set SIGSEGV signal handler\n");
+    if (argc != 2) {
+        printf("Must specify 2 args.\n");
+        return -1;
     }
 
-    // const char* url = "/home/yusuf/avdist/test_x265.mp4";
+    // ok now we have our actual TCP server/client setup here.
+    auto mode = std::string_view(argv[1]);
+    try {
+
+        if (mode == "server") {
+            asio::io_context io_context;
+
+            tcp::acceptor acceptor(io_context, tcp::endpoint(tcp::v4(), 7878));
+
+            printf("Listening for connections (synchronous)...\n");
+            for (;;) {
+                tcp::socket socket(io_context);
+                acceptor.accept(socket);
+
+                printf("[TCP] Connection accepted\n");
+
+                std::string message = "hello there!";
+                std::array<char, 64> recv_message{};
+
+                asio::error_code ignored_error;
+                // So this writes ALL of the data before returning, apparently.
+                asio::write(socket, asio::buffer(message, 1), ignored_error);
+                // I believe here we are closing the connection (through
+                // dtor)
+                auto nr =
+                    socket.read_some(asio::buffer(recv_message), ignored_error);
+                // yeah so read reads ALL the bytes. read_some only reads some.
+                // Maybe read up on how this read stuff is determined.
+                std::cout << "Read data from client: "
+                          << std::string_view(recv_message.data(), nr) << '\n';
+            }
+
+        } else if (mode == "client") {
+            asio::io_context io_context;
+            tcp::resolver resolver(io_context);
+
+            auto endpoints = resolver.resolve("localhost", "7878");
+
+            tcp::socket socket(io_context);
+            asio::connect(socket, endpoints);
+
+            std::string_view data_to_send = "Howdy! I'm jack!";
+            for (;;) {
+                std::array<char, 128> buf{};
+                asio::error_code error;
+
+                size_t len = socket.read_some(asio::buffer(buf), error);
+
+                if (error == asio::error::eof) {
+                    break; // Connection closed cleanly by peer (server).
+                } else if (error) {
+                    throw asio::system_error(error); // Some other error.}
+                }
+                // data ends up in the buffer here.
+                std::cout.write(buf.data(), len);
+
+                // how do I write data back?
+                asio::write(socket, asio::buffer(data_to_send), error);
+            }
+        } else {
+            printf("unknown mode %.*s.\n", (int)mode.size(), mode.data());
+        }
+
+    } catch (std::exception& e) {
+        printf("Exception: %s\n", e.what());
+    }
+}
+
+int main_unused(int argc, char* argv[]) {
+    if (signal(SIGSEGV, segvHandler) == SIG_ERR) {
+        w_err("signal(): failed to set SIGSEGV signal handler\n");
+    }
+
     if (argc != 2) {
-        w_stderr("DiViEn: invalid number of arguments\n"
-                 "   usage: DiViEn  <video_file>\n");
+        w_err("DiViEn: invalid number of arguments\n"
+              "   usage: DiViEn  <video_file>\n");
         return -1;
     }
     const char* url = argv[1];
 
-    // I think maybe next step will be cleaning up the code. So that it will be
-    // feasible to continue working on this.
+    // I think maybe next step will be cleaning up the code. So that it will
+    // be feasible to continue working on this.
 
     // TODO maybe add option to not copy timestamps.
     // Dang this stuff is complicated.
@@ -456,7 +613,8 @@ int main(int argc, char* argv[]) {
     unsigned int nb_segments = 0;
     std::vector<Timestamp> timestamps{};
     // 250 frames per segment, 1024 segments
-    // more accurate estimate is maybe 120-250. Will depend on video of course.
+    // more accurate estimate is maybe 120-250. Will depend on video of
+    // course.
     timestamps.reserve(EST_NB_SEGMENTS * EST_PKTS_PER_SEG);
     // It would be nice to have both vectors somehow be a part of the same
     // larger allocation.
@@ -488,8 +646,8 @@ int main(int argc, char* argv[]) {
 
     // can assume argv[1] is now available
 
-    // so as soon as you use something like std::cout, the binary size increases
-    // greatly...
+    // so as soon as you use something like std::cout, the binary size
+    // increases greatly...
 
     // so we should probably find a way to not use things that increase the
     // binary size a lot...

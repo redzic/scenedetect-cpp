@@ -47,6 +47,7 @@ struct SegmentingData {
 // input stream and writing of packets on the output stream
 // to be on 2 separate threads. But how necessary is that...
 // Probably not really much.
+// TODO parallelize this code if possible.
 [[nodiscard]] int segment_video(const char* in_filename,
                                 const char* out_filename,
                                 unsigned int& nb_segments,

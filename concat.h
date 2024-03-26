@@ -50,6 +50,11 @@ extern "C" {
     DvAssert(concat != nullptr);
 
     {
+        // TODO. Apparently you can read from memory with
+        // AVIoContext or something like that.
+        // Ideally we should do that instead.
+        // https: // riptutorial.com/ffmpeg/example/30955/reading-from-memory
+        // Same thing applies for segmenting muxer.
         std::unique_ptr<FILE, decltype(&fclose)> concat_file(
             fopen("concat.txt", "wb"), fclose);
         DvAssert(concat_file != nullptr);

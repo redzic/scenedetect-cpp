@@ -1,6 +1,5 @@
 #pragma once
 
-#include <cassert>
 #include <memory>
 
 // TODO is there an alternative to unique_ptr
@@ -12,7 +11,7 @@ template <typename T, auto Alloc, auto Free> auto make_resource() {
 // TODO how do I disable warnings?
 #ifdef NDEBUG
 constexpr inline void DvAssert(bool /*unused*/) {}
-#else
-// DEBUG
+#else // DEBUG
+#include <cassert>
 #define DvAssert assert
 #endif
