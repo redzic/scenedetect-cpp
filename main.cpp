@@ -162,7 +162,8 @@ int encode_frames(const char* file_name, AVFrame* frame_buffer[],
         return -1;
     }
 
-    auto* pkt = av_packet_alloc();
+    // auto* pkt = av_packet_alloc();
+    auto pkt = make_resource<AVPacket, av_packet_alloc, av_packet_free>();
 
     // this affects how much bitrate the
     // encoder uses, it's not just metadata
@@ -198,11 +199,12 @@ int encode_frames(const char* file_name, AVFrame* frame_buffer[],
     for (size_t i = 0; i < frame_count; i++) {
         // required
         frame_buffer[i]->pict_type = AV_PICTURE_TYPE_NONE;
-        encode(avcc, frame_buffer[i], pkt, file.get());
+        encode(avcc, frame_buffer[i], pkt.get(), file.get());
+        // actually nvm I'm not sure why this data seems wrong.
         num_frames_completed++;
     }
     // need to send flush packet
-    encode(avcc, nullptr, pkt, file.get());
+    encode(avcc, nullptr, pkt.get(), file.get());
 
     avcodec_free_context(&avcc);
 
@@ -266,8 +268,8 @@ int worker_thread(unsigned int worker_id, DecodeContext& decoder) {
     }
 }
 
-// void avlog_do_nothing(void* /* unused */, int /* level */,
-//                       const char* /* szFmt */, va_list /* varg */) {}
+void avlog_do_nothing(void* /* unused */, int /* level */,
+                      const char* /* szFmt */, va_list /* varg */) {}
 
 // so I mean as hack we could do this dumb shit
 // with checking the callback stuff...
@@ -487,7 +489,7 @@ using asio::ip::tcp;
 // decoded frames existing. Or that refcounting handles them properly or
 // whatever.
 
-int main(int argc, char* argv[]) {
+int main_unused(int argc, char* argv[]) {
     if (argc != 2) {
         printf("Must specify 2 args.\n");
         return -1;
@@ -591,9 +593,12 @@ int main(int argc, char* argv[]) {
     } catch (std::exception& e) {
         printf("Exception: %s\n", e.what());
     }
+    return 0;
 }
+// TODO I'm pretty sure the progress bar is totally wrong.
+// It's counting frames sent instead of packets received.
 
-int main_unused(int argc, char* argv[]) {
+int main(int argc, char* argv[]) {
     if (signal(SIGSEGV, segvHandler) == SIG_ERR) {
         w_err("signal(): failed to set SIGSEGV signal handler\n");
     }
@@ -620,6 +625,7 @@ int main_unused(int argc, char* argv[]) {
     // But hopefully it isn't possible that the very first segment
     // has extra packets.
 
+#if 0
     unsigned int nb_segments = 0;
     std::vector<Timestamp> timestamps{};
     // 250 frames per segment, 1024 segments
@@ -643,6 +649,7 @@ int main_unused(int argc, char* argv[]) {
     fix_broken_segments(nb_segments, packet_offsets, timestamps);
 
     return 0;
+#endif
 
     // av_log_set_level(AV_LOG_VERBOSE);
 
@@ -664,14 +671,12 @@ int main_unused(int argc, char* argv[]) {
 
     // bro WHY are there dropped frames...
     // when decoding man... I just don't get all of them.
-    return 0;
 
     // TODO allow setting log level via CLI
-    // av_log_set_callback(avlog_do_nothing);
+    av_log_set_callback(avlog_do_nothing);
     // should I just modify the ffmpeg library to do what
     // I need it to do? Hmm... Well it won't work with the system
     // version of the library then, unfortunately.
-    av_log_set_callback(av_log_default_callback);
     // av_log_default_callback();
 
     // TODO move all this to another function
