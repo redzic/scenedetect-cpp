@@ -1,5 +1,4 @@
 #include <array>
-#include <cassert>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
@@ -17,7 +16,6 @@
 #include <variant>
 #include <vector>
 
-#include "concat.h"
 #include "decode.h"
 #include "resource.h"
 #include "segment.h"
@@ -124,6 +122,10 @@ int encode(AVCodecContext* enc_ctx, AVFrame* frame, AVPacket* pkt,
         av_packet_unref(pkt);
     }
 
+    // av_frame_unref() is probably what we will need.
+
+    // I mean, I guess we just don't unref the data.
+
     return 0;
 }
 
@@ -148,6 +150,7 @@ int encode_frames(const char* file_name, AVFrame* frame_buffer[],
                   size_t frame_count) {
     DvAssert(frame_count >= 1);
 
+    // TODO is it possible to reuse encoder instances?
     const auto* codec = avcodec_find_encoder_by_name("libaom-av1");
     // so avcodeccontext is used for both encoding and decoding...
     auto* avcc = avcodec_alloc_context3(codec);
@@ -190,18 +193,17 @@ int encode_frames(const char* file_name, AVFrame* frame_buffer[],
     // static linking
 
     // TODO use unique_ptr as wrapper resource manager
-    FILE* file = fopen(file_name, "wb");
+    make_file(file, file_name, "wb");
 
     for (size_t i = 0; i < frame_count; i++) {
         // required
         frame_buffer[i]->pict_type = AV_PICTURE_TYPE_NONE;
-        encode(avcc, frame_buffer[i], pkt, file);
+        encode(avcc, frame_buffer[i], pkt, file.get());
         num_frames_completed++;
     }
     // need to send flush packet
-    encode(avcc, nullptr, pkt, file);
+    encode(avcc, nullptr, pkt, file.get());
 
-    (void)fclose(file);
     avcodec_free_context(&avcc);
 
     return 0;
@@ -452,7 +454,10 @@ constexpr size_t EST_PKTS_PER_SEG = 140;
 // https://github.com/facebook/wdt
 // perhaps we should consider this.
 
-// Perhaps we should just use one global reader, to minimize latency.
+// maybe we can statically link agner fog
+// libraries too.
+
+// Perhaps we should just use one global (netowkr) reader, to minimize latency.
 // But hmm, perhaps that's not the best approach either, because one client
 // may not have the best data connection speed.
 // The best approach would be rather complex.
@@ -470,44 +475,17 @@ constexpr size_t EST_PKTS_PER_SEG = 140;
 #include <cstdio>
 #include <iostream>
 
-using asio::awaitable;
-using asio::co_spawn;
-using asio::detached;
-using asio::use_awaitable;
 using asio::ip::tcp;
-namespace this_coro = asio::this_coro;
-
-#if defined(ASIO_ENABLE_HANDLER_TRACKING)
-#define use_awaitable                                                          \
-    asio::use_awaitable_t(__FILE__, __LINE__, __PRETTY_FUNCTION__)
-#endif
-
-awaitable<void> echo(tcp::socket socket) {
-    try {
-        char data[1024];
-        for (;;) {
-            std::size_t n = co_await socket.async_read_some(asio::buffer(data),
-                                                            use_awaitable);
-            co_await async_write(socket, asio::buffer(data, n), use_awaitable);
-        }
-    } catch (std::exception& e) {
-        // I guess this is ok since it should be "TRULY" exceptional.
-        printf("echo Exception: %s\n", e.what());
-    }
-}
-
-awaitable<void> listener() {
-    auto executor = co_await this_coro::executor;
-    tcp::acceptor acceptor(executor, {tcp::v4(), 55555});
-    for (;;) {
-        tcp::socket socket = co_await acceptor.async_accept(use_awaitable);
-        co_spawn(executor, echo(std::move(socket)), detached);
-    }
-}
 
 // TODO.
 // perhaps we could avoid the overhead of redundantly reading from files.
-// By just storing the compressed data in memory.
+// By just storing the compressed data in memory. (AVIOContext)
+
+// I guess now the step is to write the loop so that we interleave decoding
+// and encoding, so that we decouple the framebuf size and all that.
+// But we should double check that the encoder doesn't rely on original
+// decoded frames existing. Or that refcounting handles them properly or
+// whatever.
 
 int main(int argc, char* argv[]) {
     if (argc != 2) {
@@ -515,36 +493,42 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
+    const char* from_file = "/home/yusuf/avdist/test_x265.mp4";
+
     // ok now we have our actual TCP server/client setup here.
     auto mode = std::string_view(argv[1]);
     try {
 
         if (mode == "server") {
             asio::io_context io_context;
+            asio::error_code error;
 
             tcp::acceptor acceptor(io_context, tcp::endpoint(tcp::v4(), 7878));
 
             printf("Listening for connections (synchronous)...\n");
+            std::array<uint8_t, 1024> read_buf;
+            int conn_num = 1;
             for (;;) {
                 tcp::socket socket(io_context);
                 acceptor.accept(socket);
 
-                printf("[TCP] Connection accepted\n");
+                printf("[TCP] Connection %d accepted\n", conn_num);
 
-                std::string message = "hello there!";
-                std::array<char, 64> recv_message{};
+                // server should send chunk to client.
 
-                asio::error_code ignored_error;
-                // So this writes ALL of the data before returning, apparently.
-                asio::write(socket, asio::buffer(message, 1), ignored_error);
-                // I believe here we are closing the connection (through
-                // dtor)
-                auto nr =
-                    socket.read_some(asio::buffer(recv_message), ignored_error);
-                // yeah so read reads ALL the bytes. read_some only reads some.
-                // Maybe read up on how this read stuff is determined.
-                std::cout << "Read data from client: "
-                          << std::string_view(recv_message.data(), nr) << '\n';
+                // Open a file in read mode
+                make_file(fptr, from_file, "rb");
+
+                // if return value
+                // TODO error handling
+                size_t n_read = 0;
+                while ((n_read = fread(read_buf.data(), 1, read_buf.size(),
+                                       fptr.get())) > 0) {
+                    // I believe this should work.
+                    asio::write(socket, asio::buffer(read_buf, n_read), error);
+                }
+
+                printf("[TCP] Connection %d closed\n", conn_num++);
             }
 
         } else if (mode == "client") {
@@ -556,9 +540,34 @@ int main(int argc, char* argv[]) {
             tcp::socket socket(io_context);
             asio::connect(socket, endpoints);
 
-            std::string_view data_to_send = "Howdy! I'm jack!";
-            for (;;) {
-                std::array<char, 128> buf{};
+            // is there a way to design the protocol without having to know the
+            // exact file sizes in bytes ahead of time?
+            // because that would kinda just add totally unnecessary overhead
+            // for nothing.
+
+            // actually yes I think we can do that with a "state machine".
+            // Once we get a message to start receiving file,
+            // then that's when we transition to "receiving file" state.
+            // each message is prefixed with a length then and then
+            // we receive a final message that says that waas the last chunk.
+
+            // and then the client sends back a response to each request,
+            // saying "ok". If we don't receive the message, then
+            // we report that I guess.
+
+            // TODO I'm gonna need some kind of system to ensure server/client
+            // code is always in sync. Probably just tests alone will get us
+            // most of the way there.
+
+            // we are receiving file from server here
+
+            // yeah this code in fact works.
+            // It correctly copies the buffer size.
+            make_file(fptr, "output.mp4", "wb");
+            size_t written = 0;
+            while (true) {
+                // TODO figure out optimal buffer size
+                std::array<uint8_t, 2048> buf;
                 asio::error_code error;
 
                 size_t len = socket.read_some(asio::buffer(buf), error);
@@ -568,12 +577,13 @@ int main(int argc, char* argv[]) {
                 } else if (error) {
                     throw asio::system_error(error); // Some other error.}
                 }
-                // data ends up in the buffer here.
-                std::cout.write(buf.data(), len);
 
-                // how do I write data back?
-                asio::write(socket, asio::buffer(data_to_send), error);
+                fwrite(buf.data(), 1, len, fptr.get());
+                // assume successful call
+                written += len;
             }
+            printf("Wrote %zu bytes to output.mp4\n", written);
+
         } else {
             printf("unknown mode %.*s.\n", (int)mode.size(), mode.data());
         }

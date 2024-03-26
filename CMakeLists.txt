@@ -42,8 +42,11 @@ pkg_check_modules(LIBAV REQUIRED IMPORTED_TARGET
     libavutil
 )
 
+# TODO can we isolate the code so that we turn on exceptions
+# for only part of the code? like the part that deals with ASIO.
+# I think it's possible.
+
 add_executable(DiViEn main.cpp decode.cpp segment.cpp)
-# add_executable(DiViEn ff.cpp )
 
 target_compile_options(DiViEn PRIVATE -Wall -Wextra -Wformat -Wno-c99-designator )
 target_link_libraries( DiViEn PkgConfig::LIBAV )

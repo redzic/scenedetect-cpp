@@ -5,6 +5,7 @@ This is due to hacks/workarounds used when dealing with
 libav. It would be a big hassle to support multiple versions.
 
 - Do not use C++ streams (iostream,fstream). They are very slow.
+- use cppfront
 
 TODO:
 - add experimental disclaimer with possibly not working codecs

@@ -55,8 +55,10 @@ extern "C" {
         // Ideally we should do that instead.
         // https: // riptutorial.com/ffmpeg/example/30955/reading-from-memory
         // Same thing applies for segmenting muxer.
-        std::unique_ptr<FILE, decltype(&fclose)> concat_file(
-            fopen("concat.txt", "wb"), fclose);
+        make_file(concat_file, "concat.txt", "wb");
+        // looks like this particular construct has 0 overhead over
+        // just calling fopen/fclose manually
+
         DvAssert(concat_file != nullptr);
         for (auto i = start_i; i <= end_i; i++) {
             DvAssert(fprintf(concat_file.get(), "file 'OUTPUT%d.mp4'\n", i) >
