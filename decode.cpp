@@ -15,21 +15,6 @@ DecodeContext::open(const char* url) {
             .type = DecoderCreationError::AllocationFailure};
     }
 
-    // auto frame1 = make_managed<AVFrame, av_frame_alloc, av_frame_free>();
-
-    // TODO properly clean up resources on alloc failure
-    FrameBuf frame_buffer{};
-
-    // because right now these allocs will not be freed upon an allocation
-    // failure.
-    for (auto& frame : frame_buffer) {
-        frame = av_frame_alloc();
-        if (frame == nullptr) {
-            return DecoderCreationError{
-                .type = DecoderCreationError::AllocationFailure};
-        }
-    }
-
     // avformat_open_input automatically frees on failure so we construct
     // the smart pointer AFTER this expression.
     AVFormatContext* raw_demuxer = nullptr;
@@ -44,7 +29,7 @@ DecodeContext::open(const char* url) {
                             avformat_close_input(&ctx);
                         })>(raw_demuxer);
 
-    // DvAssert(avformat_find_stream_info(demuxer.get(), nullptr) >= 0);
+    DvAssert(avformat_find_stream_info(demuxer.get(), nullptr) >= 0);
 
     int stream_idx = av_find_best_stream(demuxer.get(), AVMEDIA_TYPE_VIDEO, -1,
                                          -1, nullptr, 0);
@@ -91,6 +76,23 @@ DecodeContext::open(const char* url) {
     if (ret < 0) [[unlikely]] {
         return {DecoderCreationError{.type = DecoderCreationError::AVError,
                                      .averror = ret}};
+    }
+
+    // auto frame1 = make_resource<AVFrame, av_frame_alloc, av_frame_free>();
+
+    // TODO properly clean up resources on alloc failure
+    FrameBuf frame_buffer{};
+
+    for (size_t i = 0; i < frame_buffer.size(); i++) {
+        frame_buffer[i] = av_frame_alloc();
+        if (frame_buffer[i] == nullptr) [[unlikely]] {
+            // free previously allocated frames
+            for (size_t j = 0; j < i; j++) {
+                av_frame_free(&frame_buffer[i]);
+            }
+            return DecoderCreationError{
+                .type = DecoderCreationError::AllocationFailure};
+        }
     }
 
     return std::variant<DecodeContext, DecoderCreationError>{

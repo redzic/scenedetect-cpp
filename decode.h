@@ -134,9 +134,11 @@ struct DecodeContext {
 
     // TODO maybe put another abstraction of just encapsulating
     // format context and wrap that one inside here
+    // Takes ownership of the framebuf.
+    // Be very careful when calling this constructor!
     DecodeContext(AVFormatContext* demuxer_, AVCodecContext* decoder_,
-                  AVPacket* pkt_, FrameBuf frame_, int vindex)
-        : demuxer(demuxer_), pkt(pkt_), decoder(decoder_), framebuf(frame_),
+                  AVPacket* pkt_, FrameBuf framebuf_, int vindex)
+        : demuxer(demuxer_), pkt(pkt_), decoder(decoder_), framebuf(framebuf_),
           video_index(vindex) {}
 
     // Open file and initialize video decoder.
