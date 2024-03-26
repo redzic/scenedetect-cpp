@@ -332,6 +332,10 @@ void main_encode_loop(DecodeContext& d_ctx) {
 
     auto start = now();
 
+    // TODO use stack array here
+    // even if we have dynamic workers, I believe we
+    // can use alloca. Not really totally ideal but,
+    // whatever. Or just array with max capacity.
     std::vector<std::thread> thread_vector{};
     thread_vector.reserve(NUM_WORKERS);
 
@@ -354,11 +358,13 @@ void main_encode_loop(DecodeContext& d_ctx) {
 
     while (true) {
         // acquire lock on mutex I guess?
+        // TODO: see if we can release this lock earlier.
         std::unique_lock<std::mutex> lk(cv_m);
 
         // so for some reason this notify system isn't good enough
         // for checking if all threads have completed.
         auto local_start = now();
+        // TODO Is this guaranteed to deal with "spurious wakes"?
         auto status = cv.wait_for(lk, std::chrono::seconds(1));
 
         auto n_frames = num_frames_completed.load();

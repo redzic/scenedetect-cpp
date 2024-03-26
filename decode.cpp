@@ -83,12 +83,13 @@ DecodeContext::open(const char* url) {
     // TODO properly clean up resources on alloc failure
     FrameBuf frame_buffer{};
 
-    for (size_t i = 0; i < frame_buffer.size(); i++) {
-        frame_buffer[i] = av_frame_alloc();
-        if (frame_buffer[i] == nullptr) [[unlikely]] {
+    for (size_t curr_init = 0; curr_init < frame_buffer.size(); curr_init++) {
+        frame_buffer[curr_init] = av_frame_alloc();
+        if (frame_buffer[curr_init] == nullptr) [[unlikely]] {
             // free previously allocated frames
-            for (size_t j = 0; j < i; j++) {
-                av_frame_free(&frame_buffer[i]);
+            // no need to call av_frame_free on current frame, since it's null.
+            for (size_t prev_alloc = 0; prev_alloc < curr_init; prev_alloc++) {
+                av_frame_free(&frame_buffer[prev_alloc]);
             }
             return DecoderCreationError{
                 .type = DecoderCreationError::AllocationFailure};
