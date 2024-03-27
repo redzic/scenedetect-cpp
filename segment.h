@@ -97,12 +97,29 @@ inline void iter_segs(F output_i, G output_range, uint32_t nb_segments,
     }
 }
 
+template <typename F>
+inline void iter_segfiles(F use_file, uint32_t nb_segments,
+                          std::span<ConcatRange> segs) {
+    std::array<char, 64> fname_buf;
+    iter_segs(
+        [&](uint32_t i) {
+            (void)snprintf(fname_buf.data(), fname_buf.size(), "OUTPUT%d.mp4",
+                           i);
+            use_file(fname_buf.data());
+        },
+        [&](ConcatRange r) {
+            (void)snprintf(fname_buf.data(), fname_buf.size(),
+                           "OUTPUT_%d_%d.mp4", r.low, r.high);
+            use_file(fname_buf.data());
+        },
+        nb_segments, segs);
+}
+
 // TODO clean up this API. It's a mess currently.
 // segment video, including fixes to broken segments.
 // also TODO error handling
 [[nodiscard]] inline std::vector<ConcatRange>
-segment_video_fully(const char* url) {
-    unsigned int nb_segments = 0;
+segment_video_fully(const char* url, unsigned int& nb_segments) {
     // TODO is there ANY way to optimize this allocation?
     // Do we really need FULLY RANDOM access?
     // Can we "reset" the buffer after a concatenation has been made or
