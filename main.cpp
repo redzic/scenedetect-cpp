@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <mutex>
 #include <pthread.h>
@@ -41,6 +42,7 @@ extern "C" {
 namespace {
 
 #define ERASE_LINE_ANSI "\x1B[1A\x1B[2K" // NOLINT
+// #define ERASE_LINE_ANSI "" // NOLINT
 
 #define AlwaysInline __attribute__((always_inline)) inline
 
@@ -91,16 +93,11 @@ std::mutex cv_m; // NOLINT
 
 std::atomic<uint32_t> num_frames_completed(0); // NOLINT
 // false by default
-std::array<std::atomic<bool>, NUM_WORKERS> worker_threads_finished{}; // NOLINT
+// std::array<std::atomic<bool>, NUM_WORKERS> worker_threads_finished{}; //
+// NOLINT
+std::atomic<uint32_t> num_threads_finished(0); // NOLINT
 
-bool all_workers_finished() {
-    for (auto& is_finished : worker_threads_finished) {
-        if (!is_finished.load()) {
-            return false;
-        }
-    }
-    return true;
-}
+bool all_workers_finished() { return num_threads_finished == NUM_WORKERS; }
 
 int encode(AVCodecContext* enc_ctx, AVFrame* frame, AVPacket* pkt,
            FILE* ostream) {
@@ -244,7 +241,7 @@ int worker_thread(unsigned int worker_id, DecodeContext& decoder) {
 
         // error decoding
         if (frames <= 0) {
-            worker_threads_finished[worker_id].store(true);
+            num_threads_finished++;
             cv.notify_one();
             global_decoder_mutex.unlock();
             return frames;
@@ -269,7 +266,7 @@ int worker_thread(unsigned int worker_id, DecodeContext& decoder) {
             // in theory... this shouldn't need to happen as this is an encoding
             // error
 
-            worker_threads_finished[worker_id].store(true);
+            num_threads_finished++;
 
             // in normal circumstances we return from infinite loop via decoding
             // error (which we expect to be EOF).
@@ -296,7 +293,7 @@ void avlog_do_nothing(void* /* unused */, int /* level */,
 void raw_concat_files(unsigned int num_files, bool delete_after = false) {
     std::array<char, 64> buf{};
 
-    std::ofstream dst("output.mp4", std::ios::binary);
+    std::ofstream dst("output2.mp4", std::ios::binary);
 
     for (unsigned int i = 0; i < num_files; i++) {
         (void)snprintf(buf.data(), buf.size(), "file %d.mp4", i);
@@ -356,6 +353,12 @@ void main_encode_loop(DecodeContext& d_ctx) {
         }
     };
 
+    // TODO minimize size of these buffers
+    // TODO I wonder if it's more efficient to join these buffers
+    // into one. And use each half.
+    std::array<char, 32> local_fps_fmt;
+    std::array<char, 32> avg_fps_fmt;
+
     while (true) {
         // acquire lock on mutex I guess?
         // TODO: see if we can release this lock earlier.
@@ -370,35 +373,56 @@ void main_encode_loop(DecodeContext& d_ctx) {
         auto n_frames = num_frames_completed.load();
         auto frame_diff = n_frames - last_frames;
         last_frames = n_frames;
-        // since we waited exactly 1 second, frame_diff is the fps.
-
-        // actually, it's not guaranteed that we waited for exactly
-        // 1 second... so let's measure it
+        // since we waited exactly 1 second, frame_diff is the fps,
+        // unless the status is no_timeout.
 
         auto local_now = now();
         auto total_elapsed_ms = dist_ms(start, local_now).count();
 
-        uint32_t local_fps = frame_diff;
+        // So this part of the code can actually run multiple times.
+        // For each thread that signals completion.
+        // Well this does work for avoiding extra waiting unnecessarily.
+        // TODO simplify/optimize this code if possible
+
+        // hopefully the compiler can optimize out this assignment
         if (status == std::cv_status::no_timeout) [[unlikely]] {
             // this means we didn't wait for the full time
             auto elapsed_local_ms = dist_ms(local_start, local_now).count();
-            // TODO what happens when you cast INFINITY to int?
-            // maybe fix that behavior since technically that can be
-            // returned
-            local_fps = (int)compute_fps(frame_diff, elapsed_local_ms);
+            if (elapsed_local_ms > 0) [[likely]] {
+                auto local_fps = static_cast<int32_t>(
+                    compute_fps(frame_diff, elapsed_local_ms));
+                (void)snprintf(local_fps_fmt.data(), local_fps_fmt.size(), "%d",
+                               local_fps);
+            } else {
+                // write ? to buffer
+                // TODO convert everything to a better mechanism not involving
+                // null terminators and printf
+                // 2 bytes including null terminator
+                memcpy(local_fps_fmt.data(), "?", 2);
+            }
+        } else {
+            // we waited the full 1s
+            // TODO ensure it's actually 1s in case of spurious wakes
+            // auto local_fps = frame_diff;
+            (void)snprintf(local_fps_fmt.data(), local_fps_fmt.size(), "%d",
+                           frame_diff);
+        }
+        // average fps from start of encoding process
+        // TODO can we convert to faster loop with like boolean flag + function
+        // pointer or something? It probably won't actually end up being faster
+        // due to overhead tho.
+        if (total_elapsed_ms == 0) [[unlikely]] {
+            memcpy(avg_fps_fmt.data(), "?", 2);
+        } else [[likely]] {
+            auto avg_fps = compute_fps(n_frames, total_elapsed_ms);
+            snprintf(avg_fps_fmt.data(), avg_fps_fmt.size(), "%.1f", avg_fps);
         }
 
-        // average fps from start of encoding process
-        auto avg_fps = compute_fps(n_frames, total_elapsed_ms);
-
-        // TODO fix int overflow, I think it happens when
-        // 0ms were measured...
-
         // print progress
-        // TODO I guess this should detect if we are outputting to a pipe or
-        // not.
-        printf(ERASE_LINE_ANSI "frame= %d  (%d fps curr, %.1f fps avg)\n",
-               n_frames, local_fps, avg_fps);
+        // TODO I guess this should detect if we are outputting to a
+        // pipe or not.
+        printf(ERASE_LINE_ANSI "frame= %d  (%s fps curr, %s fps avg)\n",
+               n_frames, local_fps_fmt.data(), avg_fps_fmt.data());
 
         static_assert(NUM_WORKERS >= 1);
 
@@ -548,7 +572,8 @@ int main(int argc, char* argv[]) {
 
     av_log_set_callback(avlog_do_nothing);
 
-    const char* from_file = "/home/yusuf/avdist/test_x265.mp4";
+    // const char* from_file = "/home/yusuf/avdist/test_x265.mp4";
+    const char* from_file = "/home/yusuf/avdist/OUTPUT0.mp4";
 
     // ok now we have our actual TCP server/client setup here.
     auto mode = std::string_view(argv[1]);
