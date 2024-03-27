@@ -92,13 +92,13 @@ std::mutex cv_m; // NOLINT
 // error handling?
 
 std::atomic<uint32_t> num_frames_completed(0); // NOLINT
-// false by default
-// std::array<std::atomic<bool>, NUM_WORKERS> worker_threads_finished{}; //
-// NOLINT
 std::atomic<uint32_t> num_threads_finished(0); // NOLINT
 
 bool all_workers_finished() { return num_threads_finished == NUM_WORKERS; }
 
+// If pkt is refcounted, we shouldn't have to copy any data.
+// But the encoder may or may not create a reference.
+// I think it probably does? Idk.
 int encode(AVCodecContext* enc_ctx, AVFrame* frame, AVPacket* pkt,
            FILE* ostream) {
     // frame can be null, which is considered a flush frame
@@ -127,8 +127,16 @@ int encode(AVCodecContext* enc_ctx, AVFrame* frame, AVPacket* pkt,
         // just printing this takes 100ms...
         // printf("received packet from encoder of %d bytes\n", pkt->size);
 
+        // WILL NEED THIS FUNCTION: av_frame_make_writable
+        //
+        // make_writable_frame actually COPIES the data over, which is not
+        // ideal. if it's going to make a copy, the actual contents don't need
+        // to be initialized. That's a super expensive thing to do anyway. WE
+
         av_packet_unref(pkt);
     }
+
+    // av_frame_unref(AVFrame *frame)
 
     // av_frame_unref() is probably what we will need.
 
@@ -160,8 +168,8 @@ int encode_frames(const char* file_name, std::span<AVFrame*> frame_buffer) {
     DvAssert(!frame_buffer.empty());
 
     // TODO is it possible to reuse encoder instances?
-    // const auto* codec = avcodec_find_encoder_by_name("libaom-av1");
-    const auto* codec = avcodec_find_encoder_by_name("libx264");
+    const auto* codec = avcodec_find_encoder_by_name("libaom-av1");
+    // const auto* codec = avcodec_find_encoder_by_name("libx264");
     // so avcodeccontext is used for both encoding and decoding...
     // TODO make this its own class
     auto* avcc = avcodec_alloc_context3(codec);
@@ -182,14 +190,15 @@ int encode_frames(const char* file_name, std::span<AVFrame*> frame_buffer) {
     avcc->pix_fmt =
         av_pix_fmt_supported_version((AVPixelFormat)frame_buffer[0]->format);
 
-    av_opt_set(avcc->priv_data, "crf", "25", 0);
-    av_opt_set(avcc->priv_data, "preset", "veryfast", 0);
+    // av_opt_set(avcc->priv_data, "crf", "25", 0);
+    // av_opt_set(avcc->priv_data, "preset", "veryfast", 0);
     // AOM:
-    // av_opt_set(avcc->priv_data, "cpu-used", "6", 0);
-    // av_opt_set(avcc->priv_data, "end-usage", "q", 0);
-    // av_opt_set(avcc->priv_data, "enable-qm", "1", 0);
-    // av_opt_set(avcc->priv_data, "cq-level", "18", 0);
+    av_opt_set(avcc->priv_data, "cpu-used", "6", 0);
+    av_opt_set(avcc->priv_data, "end-usage", "q", 0);
+    av_opt_set(avcc->priv_data, "enable-qm", "1", 0);
+    av_opt_set(avcc->priv_data, "cq-level", "18", 0);
 
+    // RAV1E:
     // av_opt_set(avcc->priv_data, "speed", "7", 0);
 
     int ret = avcodec_open2(avcc, codec, nullptr);
@@ -290,10 +299,11 @@ void avlog_do_nothing(void* /* unused */, int /* level */,
 // assume same naming convention
 // this is direct concatenation, nothing extra done to files.
 // hardcoded. TODO remove.
-void raw_concat_files(unsigned int num_files, bool delete_after = false) {
+void raw_concat_files(const char* out_filename, unsigned int num_files,
+                      bool delete_after = false) {
     std::array<char, 64> buf{};
 
-    std::ofstream dst("output2.mp4", std::ios::binary);
+    std::ofstream dst(out_filename, std::ios::binary);
 
     for (unsigned int i = 0; i < num_files; i++) {
         (void)snprintf(buf.data(), buf.size(), "file %d.mp4", i);
@@ -322,7 +332,7 @@ void raw_concat_files(unsigned int num_files, bool delete_after = false) {
 // so that I can really handle it properly.
 // This relies on global state. Do not call this function
 // more than once.
-void main_encode_loop(DecodeContext& d_ctx) {
+void main_encode_loop(const char* out_filename, DecodeContext& d_ctx) {
     // uh... we really need a safe way to do this and stuff
     // this is really bad... just assuming enough frames are
     // available
@@ -384,7 +394,6 @@ void main_encode_loop(DecodeContext& d_ctx) {
         // Well this does work for avoiding extra waiting unnecessarily.
         // TODO simplify/optimize this code if possible
 
-        // hopefully the compiler can optimize out this assignment
         if (status == std::cv_status::no_timeout) [[unlikely]] {
             // this means we didn't wait for the full time
             auto elapsed_local_ms = dist_ms(local_start, local_now).count();
@@ -420,7 +429,7 @@ void main_encode_loop(DecodeContext& d_ctx) {
 
         // print progress
         // TODO I guess this should detect if we are outputting to a
-        // pipe or not.
+        // terminal/pipe and don't print ERASE_LINE_ASCII if not a tty.
         printf(ERASE_LINE_ANSI "frame= %d  (%s fps curr, %s fps avg)\n",
                n_frames, local_fps_fmt.data(), avg_fps_fmt.data());
 
@@ -439,7 +448,7 @@ void main_encode_loop(DecodeContext& d_ctx) {
 
     // there is no active lock on the mutex since all threads
     // terminated, so global_chunk_id can be safely accessed.
-    raw_concat_files(global_chunk_id, true);
+    raw_concat_files(out_filename, global_chunk_id, true);
 }
 
 // each index tells you the packet offset for that segment
@@ -539,30 +548,116 @@ using asio::ip::tcp;
 // TODO make this use the parsing mechanism with headers + EOF indication
 // so that we can send multiple files through this.
 // Also make a version of this that writes the file instead of reading.
-void socket_dump_to_file(tcp::socket& socket, const char* filename) {
+
+// ========================
+//
+// Here's the protoocol.
+// 4 byte header. (int). unsigned int,
+//      - LITTLE ENDIAN FORMAT.
+//        Should make this a function.
+// either positive value.
+//  or 0, which means that's the end of the stream.
+//
+// ========================
+
+// yeah so we should DEFINITELY use a bigger buffer size than 2048 bytes lol.
+
+constexpr size_t TCP_BUFFER_SIZE = 2048z * 32; // 64 Kb buffer
+
+// Returns number of bytes read.
+size_t
+socket_write_all_from_file(tcp::socket& socket,
+                           const char* filename) { // Open a file in read mode
+    make_file(fptr, filename, "rb");
+
+    std::array<uint8_t, TCP_BUFFER_SIZE> read_buf;
+    uint32_t header = 0;
+    // TODO stop ignoring errors
+    asio::error_code error;
+
+    // if return value
+    // TODO error handling
+    size_t n_read = 0;
+    size_t total_read = 0;
+    while ((n_read = fread(read_buf.data(), 1, read_buf.size(), fptr.get())) >
+           0) {
+        // I believe this should work.
+        // TODO FIX ENDIANNESS!!!!
+        header = n_read;
+        asio::write(socket, asio::buffer(&header, sizeof(header)), error);
+        asio::write(socket, asio::buffer(read_buf, n_read), error);
+        total_read += n_read;
+    }
+    header = 0;
+    DvAssert(
+        asio::write(socket, asio::buffer(&header, sizeof(header)), error) == 4);
+
+    return total_read;
+}
+
+template <typename Functor> size_t print_transfer_speed(Functor f) {
+    auto start = now();
+    size_t bytes = f();
+
+    auto total_elapsed_ms = dist_ms(start, now()).count();
+    auto mb_s = static_cast<double>(bytes) /
+                static_cast<double>(1000 * total_elapsed_ms);
+
+    // TODO : to make this more accurate, only count
+    // the times we are actually waiting on the file (not disk write
+    // times)
+    printf(" [TransferTime %ld ms] %.1f MB/s throughput (%.0f Mbps)\n",
+           total_elapsed_ms, mb_s, 8.0 * mb_s);
+    return bytes;
+}
+
+#define DISPLAY_SPEED(arguments)                                               \
+    print_transfer_speed([&]() { return arguments; })
+
+// Returns number of bytes received
+size_t socket_read_all_to_file(tcp::socket& socket, const char* filename) {
     make_file(fptr, filename, "wb");
     size_t written = 0;
+    uint32_t header = 0;
     while (true) {
         // TODO figure out optimal buffer size
-        std::array<uint8_t, 2048> buf;
+        std::array<uint8_t, TCP_BUFFER_SIZE> buf;
         asio::error_code error;
 
-        size_t len = socket.read_some(asio::buffer(buf), error);
+        // it seems like the issue is that once the file has been received,
+        // this doesn't sufficiently block for the data to be receieved from the
+        // client
+        // we should definitely like, handle connection closes properly.
+        DvAssert(asio::read(socket, asio::buffer(&header, sizeof(header)),
+                            error) == 4);
 
+        if (header == 0) {
+            break;
+        }
+
+        size_t len = 0;
+        DvAssert((len = asio::read(socket, asio::buffer(buf, header), error)) ==
+                 header);
+
+        // So the problem is that we rely on the connection being closed,
+        // but if we need to send back data to the server, the connection will
+        // not be closed.
         if (error == asio::error::eof) {
+            printf("UNEXPECTED EOF\n");
             break; // Connection closed cleanly by peer (server).
         } else if (error) {
             throw asio::system_error(error); // Some other error.}
         }
 
-        fwrite(buf.data(), 1, len, fptr.get());
-        // assume successful call
+        // assume successful call (in release mode)
+        DvAssert(fwrite(buf.data(), 1, len, fptr.get()) == len);
         written += len;
+        // printf("Wrote %zu bytes to %s\n", written, filename);
     }
-    printf("Wrote %zu bytes to %s\n", written, filename);
-}
+    // printf("Wrote %zu bytes to %s\n", written, filename);
 
-// TODO write function to delete temporary files, perhaps in the concat.
+    return written;
+}
 
 int main(int argc, char* argv[]) {
     if (argc != 2) {
@@ -572,8 +667,8 @@ int main(int argc, char* argv[]) {
 
     av_log_set_callback(avlog_do_nothing);
 
-    // const char* from_file = "/home/yusuf/avdist/test_x265.mp4";
     const char* from_file = "/home/yusuf/avdist/OUTPUT0.mp4";
+    // const char* from_file = "/home/yusuf/avdist/OUTPUT0.mp4";
 
     // ok now we have our actual TCP server/client setup here.
     auto mode = std::string_view(argv[1]);
@@ -586,27 +681,31 @@ int main(int argc, char* argv[]) {
             tcp::acceptor acceptor(io_context, tcp::endpoint(tcp::v4(), 7878));
 
             printf("Listening for connections (synchronous)...\n");
-            std::array<uint8_t, 1024> read_buf;
             int conn_num = 1;
-            for (;;) {
+            while (true) {
                 tcp::socket socket(io_context);
                 acceptor.accept(socket);
 
                 printf("[TCP] Connection %d accepted\n", conn_num);
 
-                // server should send chunk to client.
+                // I HIGHLY doubt this is not inlined lol.
+                // I'm surprised you can pass lambdas that take captures to
+                // templates like this though, that's actually insane.
 
-                // Open a file in read mode
-                make_file(fptr, from_file, "rb");
+                // Send payload to encode to client
+                auto bytes1 = DISPLAY_SPEED(
+                    socket_write_all_from_file(socket, from_file));
+                printf("Sent %zu bytes to client\n", bytes1);
 
-                // if return value
-                // TODO error handling
-                size_t n_read = 0;
-                while ((n_read = fread(read_buf.data(), 1, read_buf.size(),
-                                       fptr.get())) > 0) {
-                    // I believe this should work.
-                    asio::write(socket, asio::buffer(read_buf, n_read), error);
-                }
+                // Receive back encoded data
+                // TODO the display on this is totally misleading
+                // because it takes into account the encoding time as well.
+                // Fixing this would require a redesign to the protocol I guess.
+                auto bytes = DISPLAY_SPEED(
+                    socket_read_all_to_file(socket, "client.mp4"));
+                printf("Read back %zu bytes from client\n", bytes);
+
+                // read all data
 
                 printf("[TCP] Connection %d closed\n", conn_num++);
             }
@@ -619,6 +718,8 @@ int main(int argc, char* argv[]) {
 
             tcp::socket socket(io_context);
             asio::connect(socket, endpoints);
+
+            printf("Connected to server\n");
 
             // is there a way to design the protocol without having to know the
             // exact file sizes in bytes ahead of time?
@@ -641,27 +742,26 @@ int main(int argc, char* argv[]) {
 
             // we are receiving file from server here
 
-            // yeah this code in fact works.
-            // It correctly copies the buffer size.
-            socket_dump_to_file(socket, "output.mp4");
-            // BRUH. The issue was just that we had an open file handle
-            // We have to make sure we CLOSE the file fully before trying
-            // to open it again.
+            // where to dump the input file from the server
+            const char* input_url = "input.mp4";
+
+            // Read payload from server.
+            DISPLAY_SPEED(socket_read_all_to_file(socket, input_url));
 
             // Once output has been received, encode it.
 
-            // uhhh this doesn't work correctly when destructed as a variant,
-            // I'm pretty sure...
-            //
-            // There's a memory leak happening somewhere...
-            // Ah ok. The problem is. The raw concatenation of packets.
-            // We will have to rework the code to write actual data
-            // instead of this bs.
-            // Perhaps the issue is that the file type is guessed based off
-            // the filename?
-            auto vdec = DecodeContext::open("output.mp4");
-            main_encode_loop(std::get<DecodeContext>(vdec));
-            printf("Finished encoding output.mp4\n");
+            auto vdec = DecodeContext::open(input_url);
+            // this should take a parameter for output filename
+            // TODO remove all the hardcoding.
+            const char* outf = "output.mp4";
+            main_encode_loop(outf, std::get<DecodeContext>(vdec));
+
+            printf("Finished encoding '%s', output in : '%s'\n", input_url,
+                   outf);
+
+            // Send the encoded result to the server.
+            DISPLAY_SPEED(socket_write_all_from_file(socket, outf));
+            printf("Uploaded %s to server\n", outf);
 
         } else {
             printf("unknown mode %.*s.\n", (int)mode.size(), mode.data());
@@ -766,7 +866,7 @@ int main_unused(int argc, char* argv[]) {
             using T = std::decay_t<decltype(arg)>;
 
             if constexpr (std::is_same_v<T, DecodeContext>) {
-                main_encode_loop(arg);
+                main_encode_loop("output.mp4", arg);
 
                 // int frames = decode_loop(arg);
                 // printf("decoded %d frames\n", frames);
