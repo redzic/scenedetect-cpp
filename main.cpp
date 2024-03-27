@@ -81,22 +81,18 @@ void segvHandler(int /*unused*/) {
 
 template <class> inline constexpr bool always_false_v = false;
 
-template <class result_t = std::chrono::milliseconds,
-          class clock_t = std::chrono::steady_clock,
-          class duration_t = std::chrono::milliseconds>
-auto since(std::chrono::time_point<clock_t, duration_t> const& start) {
-    return std::chrono::duration_cast<result_t>(clock_t::now() - start);
+auto dist_ms(auto start, auto end) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
+        .count();
 }
 
-template <class result_t = std::chrono::milliseconds,
-          class clock_t = std::chrono::steady_clock,
-          class duration_t = std::chrono::milliseconds>
-auto dist_ms(std::chrono::time_point<clock_t, duration_t> const& start,
-             std::chrono::time_point<clock_t, duration_t> const& end) {
-    return std::chrono::duration_cast<result_t>(end - start);
+// TODO should we maybe pass by reference?
+auto dist_us(auto start, auto end) {
+    return std::chrono::duration_cast<std::chrono::microseconds>(end - start)
+        .count();
 }
 
-auto now() { return std::chrono::steady_clock::now(); }
+auto now() { return std::chrono::high_resolution_clock::now(); }
 
 // for chunked encoding
 struct EncodeLoopState {
@@ -193,8 +189,8 @@ int encode_frames(const char* file_name, std::span<AVFrame*> frame_buffer,
     DvAssert(!frame_buffer.empty());
 
     // TODO is it possible to reuse encoder instances?
-    // const auto* codec = avcodec_find_encoder_by_name("libaom-av1");
     const auto* codec = avcodec_find_encoder_by_name("libx264");
+    // const auto* codec = avcodec_find_encoder_by_name("libaom-av1");
     // so avcodeccontext is used for both encoding and decoding...
     // TODO make this its own class
     auto* avcc = avcodec_alloc_context3(codec);
@@ -215,6 +211,7 @@ int encode_frames(const char* file_name, std::span<AVFrame*> frame_buffer,
     avcc->pix_fmt =
         av_pix_fmt_supported_version((AVPixelFormat)frame_buffer[0]->format);
 
+    // X264:
     av_opt_set(avcc->priv_data, "crf", "25", 0);
     av_opt_set(avcc->priv_data, "preset", "veryfast", 0);
     // AOM:
@@ -422,7 +419,7 @@ void main_encode_loop(const char* out_filename, DecodeContext& d_ctx) {
         // unless the status is no_timeout.
 
         auto local_now = now();
-        auto total_elapsed_ms = dist_ms(start, local_now).count();
+        auto total_elapsed_ms = dist_ms(start, local_now);
 
         // So this part of the code can actually run multiple times.
         // For each thread that signals completion.
@@ -431,7 +428,7 @@ void main_encode_loop(const char* out_filename, DecodeContext& d_ctx) {
 
         if (status == std::cv_status::no_timeout) [[unlikely]] {
             // this means we didn't wait for the full time
-            auto elapsed_local_ms = dist_ms(local_start, local_now).count();
+            auto elapsed_local_ms = dist_ms(local_start, local_now);
             if (elapsed_local_ms > 0) [[likely]] {
                 auto local_fps = static_cast<int32_t>(
                     compute_fps(frame_diff, elapsed_local_ms));
@@ -639,15 +636,16 @@ template <typename Functor> size_t print_transfer_speed(Functor f) {
     size_t bytes = f();
 
     if (bytes != 0) {
-        auto total_elapsed_ms = dist_ms(start, now()).count();
-        auto mb_s = static_cast<double>(bytes) /
-                    static_cast<double>(1000 * total_elapsed_ms);
+        auto elapsed_us = dist_us(start, now());
+        // megabytes per second
+        auto mb_s =
+            static_cast<double>(bytes) / static_cast<double>(elapsed_us);
 
         // TODO : to make this more accurate, only count
         // the times we are actually waiting on the file (not disk write
         // times)
-        printf(" [%ld ms] %.1f MB/s throughput (%.0f Mbps)\n", total_elapsed_ms,
-               mb_s, 8.0 * mb_s);
+        printf(" [%ld ms] %.1f MB/s throughput (%.0f Mbps)\n",
+               elapsed_us / 1000, mb_s, 8.0 * mb_s);
     }
     return bytes;
 }
@@ -746,7 +744,8 @@ void run_server(const char* source_file) {
                 // because it takes into account the encoding time as well.
                 // Fixing this would require a redesign to the protocol I guess.
                 std::array<char, 64> recv_buf;
-                snprintf(recv_buf.data(), recv_buf.size(), "client_%s", fname);
+                (void)snprintf(recv_buf.data(), recv_buf.size(),
+                               "recv_client_%s", fname);
                 auto bytes = DISPLAY_SPEED(
                     socket_read_all_to_file(socket, recv_buf.data(), error));
                 printf("Read back %zu bytes from client\n", bytes);
