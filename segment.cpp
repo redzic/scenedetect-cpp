@@ -22,13 +22,20 @@
 // we rolled our own concat tho. Which might not even be so hard
 // if we just dump packets based on keyframes. Could maybe look into that
 // in the future
+//
 
-void fix_broken_segments(unsigned int num_segments,
-                         std::vector<uint32_t>& packet_offsets,
-                         std::span<Timestamp> timestamps) {
+std::vector<ConcatRange>
+fix_broken_segments(unsigned int num_segments,
+                    std::vector<uint32_t>& packet_offsets,
+                    std::span<Timestamp> timestamps) {
 
-    auto concat_files = [&packet_offsets, timestamps](unsigned int low,
-                                                      unsigned int high) {
+    std::vector<ConcatRange> fixed_segs{};
+    fixed_segs.reserve(num_segments / 8 + 1);
+
+    auto concat_files = [&packet_offsets, timestamps,
+                         &fixed_segs](unsigned int low, unsigned int high) {
+        fixed_segs.emplace_back(low, high);
+
         std::array<char, 64> buf{};
         // TODO switch to mkv
         (void)snprintf(buf.data(), buf.size(), "OUTPUT_%d_%d.mp4", low, high);
@@ -85,6 +92,12 @@ void fix_broken_segments(unsigned int num_segments,
 
         // Concats are using inclusive range.
 
+        // wait a second...
+        // Is it possible for us to double concat?
+        // Probably not ig.
+
+        // TODO come up with something better to do this
+
         if (frames.nb_discarded == 0) [[likely]] {
             if (i != 0 && last_working != (i - 1)) [[unlikely]] {
                 printf("  CONCAT NEEDED: [%d, %d]\n", last_working, i - 1);
@@ -121,6 +134,8 @@ void fix_broken_segments(unsigned int num_segments,
 
     printf("Framesum: %d\nTotal packets: %d\n", framesum,
            framesum + nb_discarded);
+
+    return fixed_segs;
 }
 
 // I think we need to get the segmenting data out of this function.

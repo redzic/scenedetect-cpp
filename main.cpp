@@ -39,10 +39,31 @@ extern "C" {
 #include <libavutil/rational.h>
 }
 
+#if defined(__ORDER_LITTLE_ENDIAN__) && defined(__ORDER_BIG_ENDIAN__) &&       \
+    defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+
+/* little endian, supported */
+
+#elif defined(__ORDER_LITTLE_ENDIAN__) && defined(__ORDER_BIG_ENDIAN__) &&     \
+    defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
+#error                                                                         \
+    "Big endian is not currently supported. Please file a bug on github for support."
+// TODO when I get to this, test the code in qemu or something.
+// But hopefully it shouldn't be too complicated.
+// I'm pretty sure the byte order of the actual encoded data is always the same
+// anyway.
+
+#else
+
+#error                                                                         \
+    "Unsupported architecture or compiler. Please try using the latest version of clang. If that does not work, please file a bug on github."
+
+#endif
+
 namespace {
 
-#define ERASE_LINE_ANSI "\x1B[1A\x1B[2K" // NOLINT
-// #define ERASE_LINE_ANSI "" // NOLINT
+// #define ERASE_LINE_ANSI "\x1B[1A\x1B[2K" // NOLINT
+#define ERASE_LINE_ANSI "" // NOLINT
 
 #define AlwaysInline __attribute__((always_inline)) inline
 
@@ -88,13 +109,10 @@ std::condition_variable cv; // NOLINT
 // can I override the standard memcpy/memchr functions?
 std::mutex cv_m; // NOLINT
 
-// are exceptions slow? What's the fastest way to do
-// error handling?
+std::atomic<uint32_t> nb_frames_done(0);  // NOLINT
+std::atomic<uint32_t> nb_threads_done(0); // NOLINT
 
-std::atomic<uint32_t> num_frames_completed(0); // NOLINT
-std::atomic<uint32_t> num_threads_finished(0); // NOLINT
-
-bool all_workers_finished() { return num_threads_finished == NUM_WORKERS; }
+bool all_workers_finished() { return nb_threads_done == NUM_WORKERS; }
 
 // If pkt is refcounted, we shouldn't have to copy any data.
 // But the encoder may or may not create a reference.
@@ -129,18 +147,18 @@ int encode(AVCodecContext* enc_ctx, AVFrame* frame, AVPacket* pkt,
 
         // WILL NEED THIS FUNCTION: av_frame_make_writable
         //
-        // make_writable_frame actually COPIES the data over, which is not
-        // ideal. if it's going to make a copy, the actual contents don't need
-        // to be initialized. That's a super expensive thing to do anyway. WE
+        // make_writable_frame actually COPIES the data over (potentially),
+        // which is not ideal. if it's going to make a copy, the actual contents
+        // don't need to be initialized. That's a super expensive thing to do
+        // anyway.
+        // I really don't get how that function works anyway.
+        // It seems to actually delete the original anyway. So how does that
+        // preserve references?
+        // Unless there's a difference between av_frame_unref and
+        // av_frame_free.
 
         av_packet_unref(pkt);
     }
-
-    // av_frame_unref(AVFrame *frame)
-
-    // av_frame_unref() is probably what we will need.
-
-    // I mean, I guess we just don't unref the data.
 
     return 0;
 }
@@ -218,7 +236,7 @@ int encode_frames(const char* file_name, std::span<AVFrame*> frame_buffer) {
         frame->pict_type = AV_PICTURE_TYPE_NONE;
         encode(avcc, frame, pkt.get(), file.get());
         // actually nvm I'm not sure why this data seems wrong.
-        num_frames_completed++;
+        nb_frames_done++;
     }
     // need to send flush packet
     encode(avcc, nullptr, pkt.get(), file.get());
@@ -250,16 +268,16 @@ int worker_thread(unsigned int worker_id, DecodeContext& decoder) {
 
         // error decoding
         if (frames <= 0) {
-            num_threads_finished++;
+            nb_threads_done++;
             cv.notify_one();
             global_decoder_mutex.unlock();
             return frames;
         }
 
         // these accesses are behind mutex so we're all good
-        auto chunk_idx = global_chunk_id;
+        auto chunk_idx = global_chunk_id++;
         // increment for next chunk
-        global_chunk_id++;
+        // TODO delete line global_chunk_id++;
 
         // can assume frames are available, so unlock the mutex so
         // other threads can use the decoder
@@ -274,8 +292,9 @@ int worker_thread(unsigned int worker_id, DecodeContext& decoder) {
         if (ret != 0) {
             // in theory... this shouldn't need to happen as this is an encoding
             // error
+            // mutex was already unlocked so we don't unlock.
 
-            num_threads_finished++;
+            nb_threads_done++;
 
             // in normal circumstances we return from infinite loop via decoding
             // error (which we expect to be EOF).
@@ -380,7 +399,7 @@ void main_encode_loop(const char* out_filename, DecodeContext& d_ctx) {
         // TODO Is this guaranteed to deal with "spurious wakes"?
         auto status = cv.wait_for(lk, std::chrono::seconds(1));
 
-        auto n_frames = num_frames_completed.load();
+        auto n_frames = nb_frames_done.load();
         auto frame_diff = n_frames - last_frames;
         last_frames = n_frames;
         // since we waited exactly 1 second, frame_diff is the fps,
@@ -451,6 +470,8 @@ void main_encode_loop(const char* out_filename, DecodeContext& d_ctx) {
     raw_concat_files(out_filename, global_chunk_id, true);
 }
 
+// I guess the next step is to send each chunk in a loop.
+
 // each index tells you the packet offset for that segment
 // for both dts and pts, of course.
 
@@ -474,12 +495,6 @@ void main_encode_loop(const char* out_filename, DecodeContext& d_ctx) {
 // For concat I really don't know if I should use the concat
 // filter or just directly put the packets next to each other.
 // Probably better to use concat filter I guess.
-
-// reasonable estimate for initial allocation amount
-constexpr size_t EST_NB_SEGMENTS = 1100;
-
-// reasonable estimate for packets per segment
-constexpr size_t EST_PKTS_PER_SEG = 140;
 
 // BE CAREFUL NOT TO WRITE ASSERTS
 // WITH SIDE EFFECTS.
@@ -553,7 +568,7 @@ using asio::ip::tcp;
 //
 // Here's the protoocol.
 // 4 byte header. (int). unsigned int,
-//      - LITTLE ENDIAN FORMAT.
+//      - LITTLE ENDIAN.
 //        Should make this a function.
 // either positive value.
 //  or 0, which means that's the end of the stream.
@@ -563,6 +578,8 @@ using asio::ip::tcp;
 // yeah so we should DEFINITELY use a bigger buffer size than 2048 bytes lol.
 
 constexpr size_t TCP_BUFFER_SIZE = 2048z * 32; // 64 Kb buffer
+
+// TODO move networking code to another flie.
 
 // Returns number of bytes read.
 size_t
@@ -595,6 +612,11 @@ socket_write_all_from_file(tcp::socket& socket,
     return total_read;
 }
 
+// TODO check on godbolt if the compiler auto dedups
+// these calls, or if it inlines them or what.
+// I imagine it prob doesn't. But who knows. I mean .
+// Yeah probably not. But we should check
+// how to make it dedup it.
 template <typename Functor> size_t print_transfer_speed(Functor f) {
     auto start = now();
     size_t bytes = f();
@@ -606,8 +628,8 @@ template <typename Functor> size_t print_transfer_speed(Functor f) {
     // TODO : to make this more accurate, only count
     // the times we are actually waiting on the file (not disk write
     // times)
-    printf(" [TransferTime %ld ms] %.1f MB/s throughput (%.0f Mbps)\n",
-           total_elapsed_ms, mb_s, 8.0 * mb_s);
+    printf(" [%ld ms] %.1f MB/s throughput (%.0f Mbps)\n", total_elapsed_ms,
+           mb_s, 8.0 * mb_s);
     return bytes;
 }
 
@@ -659,112 +681,138 @@ size_t socket_read_all_to_file(tcp::socket& socket, const char* filename) {
     return written;
 }
 
+// new protocol, receive and send N chunks
+// When server closes connection, client closes also.
+// I Guess we don't have to actually change anything.
+
+// source_file is the file to segment and encode
+void run_server(const char* source_file) {
+    // we need a list of file names here
+    // Ideally we should return some data structure
+    // and generate the filename with snprintf
+    // auto seg_result = segment_video_fully(source_file);
+
+    asio::io_context io_context;
+    asio::error_code error;
+
+    tcp::acceptor acceptor(io_context, tcp::endpoint(tcp::v4(), 7878));
+
+    printf("Listening for connections (synchronous)...\n");
+    int conn_num = 1;
+    while (true) {
+        tcp::socket socket(io_context);
+        acceptor.accept(socket);
+
+        printf("[TCP] Connection %d accepted\n", conn_num);
+
+        // I HIGHLY doubt this is not inlined lol.
+        // I'm surprised you can pass lambdas that take captures to
+        // templates like this though, that's actually insane.
+
+        // TODO (long term) Honestly using bittorrent to distribute the chunks
+        // among other stuff is probably the way to go.
+
+        // Send payload to encode to client
+        auto bytes1 =
+            DISPLAY_SPEED(socket_write_all_from_file(socket, source_file));
+        printf("Sent %zu bytes to client\n", bytes1);
+
+        // TODO. It would be faster to transfer the encoded packets
+        // as they are complete, so we do stuff in parallel.
+        // Instead of waiting around for chunks to be entirely finished.
+
+        // Receive back encoded data
+        // TODO the display on this is totally misleading
+        // because it takes into account the encoding time as well.
+        // Fixing this would require a redesign to the protocol I guess.
+        auto bytes =
+            DISPLAY_SPEED(socket_read_all_to_file(socket, "client.mp4"));
+        printf("Read back %zu bytes from client\n", bytes);
+
+        // read all data
+
+        printf("[TCP] Connection %d closed\n", conn_num++);
+    }
+}
+
+void run_client() {
+    asio::io_context io_context;
+    tcp::resolver resolver(io_context);
+
+    auto endpoints = resolver.resolve("localhost", "7878");
+
+    tcp::socket socket(io_context);
+    asio::connect(socket, endpoints);
+
+    printf("Connected to server\n");
+
+    // is there a way to design the protocol without having to know the
+    // exact file sizes in bytes ahead of time?
+    // because that would kinda just add totally unnecessary overhead
+    // for nothing.
+
+    // actually yes I think we can do that with a "state machine".
+    // Once we get a message to start receiving file,
+    // then that's when we transition to "receiving file" state.
+    // each message is prefixed with a length then and then
+    // we receive a final message that says that waas the last chunk.
+
+    // and then the client sends back a response to each request,
+    // saying "ok". If we don't receive the message, then
+    // we report that I guess.
+
+    // TODO I'm gonna need some kind of system to ensure server/client
+    // code is always in sync. Probably just tests alone will get us
+    // most of the way there.
+
+    // we are receiving file from server here
+
+    // where to dump the input file from the server
+    const char* input_url = "input.mp4";
+
+    // Read payload from server.
+    DISPLAY_SPEED(socket_read_all_to_file(socket, input_url));
+
+    // Once output has been received, encode it.
+
+    auto vdec = DecodeContext::open(input_url);
+    // this should take a parameter for output filename
+    // TODO remove all the hardcoding.
+    const char* outf = "output.mp4";
+    main_encode_loop(outf, std::get<DecodeContext>(vdec));
+
+    printf("Finished encoding '%s', output in : '%s'\n", input_url, outf);
+
+    // Send the encoded result to the server.
+    DISPLAY_SPEED(socket_write_all_from_file(socket, outf));
+    printf("Uploaded %s to server\n", outf);
+}
+
 int main(int argc, char* argv[]) {
     if (argc != 2) {
         printf("Must specify 2 args.\n");
         return -1;
     }
 
-    av_log_set_callback(avlog_do_nothing);
+    // av_log_set_callback(avlog_do_nothing);
 
-    const char* from_file = "/home/yusuf/avdist/OUTPUT0.mp4";
+    const char* from_file = "/home/yusuf/avdist/test_x265.mp4";
     // const char* from_file = "/home/yusuf/avdist/OUTPUT0.mp4";
 
     // ok now we have our actual TCP server/client setup here.
+    // next step AFTER this is to setup async
+    // so that we can handle multiple clients at once easily.
+    // Or at least multithreading or whatever.
+    // Honestly yeah let's just use async.
     auto mode = std::string_view(argv[1]);
     try {
 
         if (mode == "server") {
-            asio::io_context io_context;
-            asio::error_code error;
-
-            tcp::acceptor acceptor(io_context, tcp::endpoint(tcp::v4(), 7878));
-
-            printf("Listening for connections (synchronous)...\n");
-            int conn_num = 1;
-            while (true) {
-                tcp::socket socket(io_context);
-                acceptor.accept(socket);
-
-                printf("[TCP] Connection %d accepted\n", conn_num);
-
-                // I HIGHLY doubt this is not inlined lol.
-                // I'm surprised you can pass lambdas that take captures to
-                // templates like this though, that's actually insane.
-
-                // Send payload to encode to client
-                auto bytes1 = DISPLAY_SPEED(
-                    socket_write_all_from_file(socket, from_file));
-                printf("Sent %zu bytes to client\n", bytes1);
-
-                // Receive back encoded data
-                // TODO the display on this is totally misleading
-                // because it takes into account the encoding time as well.
-                // Fixing this would require a redesign to the protocol I guess.
-                auto bytes = DISPLAY_SPEED(
-                    socket_read_all_to_file(socket, "client.mp4"));
-                printf("Read back %zu bytes from client\n", bytes);
-
-                // read all data
-
-                printf("[TCP] Connection %d closed\n", conn_num++);
-            }
-
+            run_server(from_file);
         } else if (mode == "client") {
-            asio::io_context io_context;
-            tcp::resolver resolver(io_context);
-
-            auto endpoints = resolver.resolve("localhost", "7878");
-
-            tcp::socket socket(io_context);
-            asio::connect(socket, endpoints);
-
-            printf("Connected to server\n");
-
-            // is there a way to design the protocol without having to know the
-            // exact file sizes in bytes ahead of time?
-            // because that would kinda just add totally unnecessary overhead
-            // for nothing.
-
-            // actually yes I think we can do that with a "state machine".
-            // Once we get a message to start receiving file,
-            // then that's when we transition to "receiving file" state.
-            // each message is prefixed with a length then and then
-            // we receive a final message that says that waas the last chunk.
-
-            // and then the client sends back a response to each request,
-            // saying "ok". If we don't receive the message, then
-            // we report that I guess.
-
-            // TODO I'm gonna need some kind of system to ensure server/client
-            // code is always in sync. Probably just tests alone will get us
-            // most of the way there.
-
-            // we are receiving file from server here
-
-            // where to dump the input file from the server
-            const char* input_url = "input.mp4";
-
-            // Read payload from server.
-            DISPLAY_SPEED(socket_read_all_to_file(socket, input_url));
-
-            // Once output has been received, encode it.
-
-            auto vdec = DecodeContext::open(input_url);
-            // this should take a parameter for output filename
-            // TODO remove all the hardcoding.
-            const char* outf = "output.mp4";
-            main_encode_loop(outf, std::get<DecodeContext>(vdec));
-
-            printf("Finished encoding '%s', output in : '%s'\n", input_url,
-                   outf);
-
-            // Send the encoded result to the server.
-            DISPLAY_SPEED(socket_write_all_from_file(socket, outf));
-            printf("Uploaded %s to server\n", outf);
-
+            run_client();
         } else {
-            printf("unknown mode %.*s.\n", (int)mode.size(), mode.data());
+            printf("unknown mode '%.*s'.\n", (int)mode.size(), mode.data());
         }
 
     } catch (std::exception& e) {
@@ -802,31 +850,7 @@ int main_unused(int argc, char* argv[]) {
     // But hopefully it isn't possible that the very first segment
     // has extra packets.
 
-#if 0
-    unsigned int nb_segments = 0;
-    std::vector<Timestamp> timestamps{};
-    // 250 frames per segment, 1024 segments
-    // more accurate estimate is maybe 120-250. Will depend on video of
-    // course.
-    timestamps.reserve(EST_NB_SEGMENTS * EST_PKTS_PER_SEG);
-    // It would be nice to have both vectors somehow be a part of the same
-    // larger allocation.
-    // BRUH...
-    DvAssert(segment_video(url, "OUTPUT%d.mp4", nb_segments, timestamps) == 0);
-
-    printf("%zu - seg size\n", timestamps.size());
-
-    std::vector<uint32_t> packet_offsets{};
-    packet_offsets.reserve(EST_NB_SEGMENTS);
-    // LETS GO DUDE. FINALLY IT'S WORKING.
-
-    // TODO: remove extra debugging checks for frames,
-    // or make it optional or something (eventually).
-
-    fix_broken_segments(nb_segments, packet_offsets, timestamps);
-
     return 0;
-#endif
 
     // av_log_set_level(AV_LOG_VERBOSE);
 

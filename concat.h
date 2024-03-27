@@ -159,7 +159,7 @@ extern "C" {
         // Copy timestamps from ORIGINAL video stream.
         auto ts =
             seg_data.timestamps[seg_data.packet_offsets[start_i] + pkt_index++];
-        // TODO use .at() in span (C++23)
+        // TODO use .at() in span (C++26 feature idk why)
         pkt->dts = ts.dts;
         pkt->pts = ts.pts;
         pkt->pos = -1;
